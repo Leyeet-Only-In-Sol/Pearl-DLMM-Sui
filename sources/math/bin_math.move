@@ -6,7 +6,6 @@ module sui_dlmm::bin_math {
     
     // Error codes
     const EINVALID_BIN_STEP: u64 = 1;
-    const EPRICE_TOO_HIGH: u64 = 2;
     const EPRICE_TOO_LOW: u64 = 3;
     const EMATH_OVERFLOW: u64 = 4;
 
@@ -85,7 +84,7 @@ module sui_dlmm::bin_math {
 
     /// Efficient integer exponentiation using binary exponentiation
     /// Calculates base^exp where base is scaled by PRICE_SCALE
-    fun power_u128(base: u128, exp: u32): u128 {
+    public fun power_u128(base: u128, exp: u32): u128 {
         if (exp == 0) return PRICE_SCALE;
         if (exp == 1) return base;
         

@@ -1,8 +1,6 @@
 module sui_dlmm::volatility {
     // Time constants (all in milliseconds)
     const MILLISECONDS_PER_SECOND: u64 = 1000;
-    const MILLISECONDS_PER_MINUTE: u64 = 60000;
-    const MILLISECONDS_PER_HOUR: u64 = 3600000;
     
     // Volatility constants
     const VOLATILITY_SCALE: u64 = 1000;
@@ -16,7 +14,6 @@ module sui_dlmm::volatility {
     
     // Error codes
     const EINVALID_TIME: u64 = 1;
-    const EVOLATILITY_OVERFLOW: u64 = 2;
 
     /// Volatility accumulator structure to track market volatility
     public struct VolatilityAccumulator has store, copy, drop {
@@ -285,19 +282,6 @@ module sui_dlmm::volatility {
         true
     }
 
-    #[test_only]
-    /// Test volatility updates and decay
-    public fun test_volatility_update_and_decay(): bool {
-        let mut accumulator = new_volatility_accumulator(1000, 0);
-        
-        // Update with some volatility
-        accumulator = update_volatility_accumulator(
-            accumulator,
-            1005, // new bin (5 bins away)
-            3,    // 3 bins crossed
-            1000  // 1 second later
-        );
-        
     #[test_only]
     /// Test volatility updates and decay
     public fun test_volatility_update_and_decay(): bool {
