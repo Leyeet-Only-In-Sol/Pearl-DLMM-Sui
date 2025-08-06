@@ -4,6 +4,10 @@ module sui_dlmm::core_tests {
     use sui::test_scenario::{Self as test, Scenario};
     use sui::coin::{Self, Coin, TreasuryCap};
     use sui::test_utils::assert_eq;
+    use sui_dlmm::bin_math;
+    use sui_dlmm::constant_sum;
+    use sui_dlmm::fee_math;
+    use sui_dlmm::volatility;
 
     // Test coins for our DLMM tests - Add public visibility for Move 2024
     public struct TESTA has drop {}
@@ -393,32 +397,17 @@ module sui_dlmm::core_tests {
         test::end(scenario);
     }
 
-    // Helper functions for testing (would be implemented in actual modules)
+    // Helper functions for testing (now use actual implementations)
     fun calculate_bin_price(bin_id: u32, bin_step: u16): u128 {
-        // Simplified calculation for testing
-        let base = 10000 + (bin_step as u128);
-        power(base * PRICE_SCALE / 10000, bin_id)
+        bin_math::calculate_bin_price(bin_id, bin_step)
     }
 
     fun get_bin_from_price(price: u128, bin_step: u16): u32 {
-        // Simplified reverse calculation
-        if (price <= PRICE_SCALE) {
-            0
-        } else {
-            // Approximate log calculation
-            ((price - PRICE_SCALE) * 10000 / PRICE_SCALE / (bin_step as u128)) as u32
-        }
+        bin_math::get_bin_from_price(price, bin_step)
     }
 
     fun power(base: u128, exp: u32): u128 {
-        if (exp == 0) return PRICE_SCALE;
-        let mut result = PRICE_SCALE;
-        let mut i = 0;
-        while (i < exp) {
-            result = result * base / PRICE_SCALE;
-            i = i + 1;
-        };
-        result
+        bin_math::power_u128(base, exp) // This function needs to be made public in bin_math
     }
 
     fun abs_diff(a: u128, b: u128): u128 {
@@ -434,9 +423,7 @@ module sui_dlmm::core_tests {
         price: u128,
         composition_percent: u8
     ): (u64, u64) {
-        let liquidity_y = liquidity * (composition_percent as u64) / 100;
-        let liquidity_x = ((liquidity - liquidity_y) as u128) * PRICE_SCALE / price;
-        (liquidity_x as u64, liquidity_y)
+        constant_sum::calculate_amounts_from_liquidity(liquidity, price, composition_percent)
     }
 
     fun swap_x_for_y_within_bin(
@@ -445,20 +432,18 @@ module sui_dlmm::core_tests {
         amount_x_in: u64,
         price: u128
     ): (u64, bool) {
-        let available_x = *liquidity_x;
-        let actual_amount_in = if (amount_x_in <= available_x) {
-            amount_x_in
-        } else {
-            available_x
-        };
+        let (amount_out, bin_exhausted) = constant_sum::swap_within_bin(
+            *liquidity_x, *liquidity_y, amount_x_in, true, price
+        );
         
-        let amount_y_out = (actual_amount_in as u128) * price / PRICE_SCALE;
-        let amount_y_out_u64 = amount_y_out as u64;
+        // Update the liquidity values
+        let (new_x, new_y) = constant_sum::update_reserves_after_swap(
+            *liquidity_x, *liquidity_y, amount_x_in, amount_out, true
+        );
+        *liquidity_x = new_x;
+        *liquidity_y = new_y;
         
-        *liquidity_x = *liquidity_x + actual_amount_in;
-        *liquidity_y = *liquidity_y - amount_y_out_u64;
-        
-        (amount_y_out_u64, actual_amount_in == available_x)
+        (amount_out, bin_exhausted)
     }
 
     // Additional helper functions...
@@ -477,9 +462,7 @@ module sui_dlmm::core_tests {
     }
 
     fun calculate_dynamic_fee(base_factor: u16, bin_step: u16, bins_crossed: u32): u64 {
-        let base_fee = (base_factor as u64) * (bin_step as u64) / 10000;
-        let variable_fee = base_fee * (bins_crossed as u64) * 10 / 100; // 10% per bin crossed
-        base_fee + variable_fee
+        fee_math::calculate_dynamic_fee(base_factor, bin_step, bins_crossed)
     }
 
     fun calculate_distribution_weights(
