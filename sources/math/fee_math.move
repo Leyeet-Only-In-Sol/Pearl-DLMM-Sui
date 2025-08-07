@@ -4,8 +4,7 @@ module sui_dlmm::fee_math {
     const VOLATILITY_SCALE: u64 = 1000; // Scale for volatility calculations
     const MAX_VARIABLE_FEE_MULTIPLIER: u64 = 1000; // Max 10x base fee from volatility
     
-    // Fee configuration constants
-    const DEFAULT_BASE_FACTOR: u16 = 100; // 1% of bin step as base factor
+    // Fee configuration constants (removed unused DEFAULT_BASE_FACTOR)
     const MAX_BASE_FACTOR: u16 = 1000; // Maximum base factor (10x)
     const MAX_PROTOCOL_FEE_RATE: u16 = 5000; // Maximum 50% protocol fee
     

@@ -1,16 +1,12 @@
 module sui_dlmm::factory {
-    use sui::object::{UID, ID};
-    use sui::tx_context::{TxContext, sender};
+    use sui::tx_context::sender;
     use sui::table::{Self, Table};
     use sui::coin::Coin;
     use sui::clock::Clock;
     use sui::event;
-    use sui::transfer;
     use std::type_name::{Self, TypeName};
-    use std::ascii; // Use ascii for TypeName compatibility
+    use std::ascii;
     use std::bcs;
-    use std::vector;
-    use std::option;
     
     use sui_dlmm::dlmm_pool::{Self, DLMMPool};
 
@@ -22,13 +18,13 @@ module sui_dlmm::factory {
 
     /// Factory for creating and managing pools
     public struct DLMMFactory has key {
-        id: UID,
-        pools: Table<vector<u8>, ID>,           // pool_key -> pool_id mapping
-        allowed_bin_steps: vector<u16>,          // Allowed bin step values
-        protocol_fee_rate: u16,                  // Global protocol fee rate
-        pool_count: u64,                         // Total pools created
-        admin: address,                          // Admin address for governance
-        created_at: u64,                         // Factory creation timestamp
+        id: sui::object::UID,
+        pools: Table<vector<u8>, sui::object::ID>,    // pool_key -> pool_id mapping
+        allowed_bin_steps: vector<u16>,               // Allowed bin step values
+        protocol_fee_rate: u16,                       // Global protocol fee rate
+        pool_count: u64,                              // Total pools created
+        admin: address,                               // Admin address for governance
+        created_at: u64,                              // Factory creation timestamp
     }
 
     /// Pool registry entry
@@ -44,9 +40,9 @@ module sui_dlmm::factory {
     // ==================== Factory Creation ====================
 
     /// Initialize factory - called once at deployment
-    fun init(ctx: &mut TxContext) {
+    fun init(ctx: &mut sui::tx_context::TxContext) {
         let factory = DLMMFactory {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             pools: table::new(ctx),
             allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000], // Common bin steps
             protocol_fee_rate: 300, // 3% default
@@ -54,7 +50,7 @@ module sui_dlmm::factory {
             admin: sender(ctx),
             created_at: 0, // Will be set properly when we have clock
         };
-        transfer::share_object(factory);
+        sui::transfer::share_object(factory);
     }
 
     // ==================== Pool Creation ====================
@@ -68,7 +64,7 @@ module sui_dlmm::factory {
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): DLMMPool<CoinA, CoinB> {
         // Validate bin step is allowed
         assert!(vector::contains(&factory.allowed_bin_steps, &bin_step), EINVALID_BIN_STEP);
@@ -89,7 +85,7 @@ module sui_dlmm::factory {
             ctx
         );
 
-        let pool_id = object::id(&pool);
+        let pool_id = sui::object::id(&pool);
         
         // Register pool in factory
         table::add(&mut factory.pools, pool_key, pool_id);
@@ -97,7 +93,7 @@ module sui_dlmm::factory {
 
         // Emit pool creation event
         event::emit(PoolCreatedInFactory {
-            factory_id: object::uid_to_inner(&factory.id),
+            factory_id: sui::object::uid_to_inner(&factory.id),
             pool_id,
             coin_a: type_name::get<CoinA>(),
             coin_b: type_name::get<CoinB>(),
@@ -165,12 +161,12 @@ module sui_dlmm::factory {
     public fun get_pool_id<CoinA, CoinB>(
         factory: &DLMMFactory,
         bin_step: u16
-    ): option::Option<ID> {
+    ): std::option::Option<sui::object::ID> {
         let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
         if (table::contains(&factory.pools, pool_key)) {
-            option::some(*table::borrow(&factory.pools, pool_key))
+            std::option::some(*table::borrow(&factory.pools, pool_key))
         } else {
-            option::none()
+            std::option::none()
         }
     }
 
@@ -204,7 +200,7 @@ module sui_dlmm::factory {
     public fun add_allowed_bin_step(
         factory: &mut DLMMFactory,
         bin_step: u16,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
         assert!(!vector::contains(&factory.allowed_bin_steps, &bin_step), EINVALID_BIN_STEP);
@@ -212,7 +208,7 @@ module sui_dlmm::factory {
         vector::push_back(&mut factory.allowed_bin_steps, bin_step);
         
         event::emit(BinStepAdded {
-            factory_id: object::uid_to_inner(&factory.id),
+            factory_id: sui::object::uid_to_inner(&factory.id),
             bin_step,
             admin: factory.admin,
         });
@@ -222,7 +218,7 @@ module sui_dlmm::factory {
     public fun remove_allowed_bin_step(
         factory: &mut DLMMFactory,
         bin_step: u16,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
         
@@ -232,7 +228,7 @@ module sui_dlmm::factory {
         vector::remove(&mut factory.allowed_bin_steps, index);
         
         event::emit(BinStepRemoved {
-            factory_id: object::uid_to_inner(&factory.id),
+            factory_id: sui::object::uid_to_inner(&factory.id),
             bin_step,
             admin: factory.admin,
         });
@@ -242,7 +238,7 @@ module sui_dlmm::factory {
     public fun set_protocol_fee_rate(
         factory: &mut DLMMFactory,
         protocol_fee_rate: u16,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
         assert!(protocol_fee_rate <= 5000, EINVALID_PROTOCOL_FEE); // Max 50%
@@ -251,7 +247,7 @@ module sui_dlmm::factory {
         factory.protocol_fee_rate = protocol_fee_rate;
         
         event::emit(ProtocolFeeRateChanged {
-            factory_id: object::uid_to_inner(&factory.id),
+            factory_id: sui::object::uid_to_inner(&factory.id),
             old_rate,
             new_rate: protocol_fee_rate,
             admin: factory.admin,
@@ -262,7 +258,7 @@ module sui_dlmm::factory {
     public fun transfer_admin(
         factory: &mut DLMMFactory,
         new_admin: address,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
         
@@ -270,7 +266,7 @@ module sui_dlmm::factory {
         factory.admin = new_admin;
         
         event::emit(AdminTransferred {
-            factory_id: object::uid_to_inner(&factory.id),
+            factory_id: sui::object::uid_to_inner(&factory.id),
             old_admin,
             new_admin,
         });
@@ -300,7 +296,7 @@ module sui_dlmm::factory {
 
     // ==================== Utility Functions ====================
 
-    /// Create pool and share it immediately (FIXED - made entry function)
+    /// Create pool and share it immediately (FIXED - delegate to dlmm_pool)
     public entry fun create_and_share_pool<CoinA, CoinB>(
         factory: &mut DLMMFactory,
         bin_step: u16,
@@ -309,7 +305,7 @@ module sui_dlmm::factory {
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ) {
         let pool = create_pool<CoinA, CoinB>(
             factory,
@@ -322,8 +318,8 @@ module sui_dlmm::factory {
             ctx
         );
         
-        // Entry functions can call transfer functions on any objects
-        transfer::share_object(pool);
+        // FIXED: Use dlmm_pool's share function instead of direct transfer
+        dlmm_pool::share_pool(pool);
     }
 
     /// Get recommended bin step for token pair based on characteristics
@@ -347,8 +343,8 @@ module sui_dlmm::factory {
     // ==================== Events ====================
 
     public struct PoolCreatedInFactory has copy, drop {
-        factory_id: ID,
-        pool_id: ID,
+        factory_id: sui::object::ID,
+        pool_id: sui::object::ID,
         coin_a: TypeName,
         coin_b: TypeName,
         bin_step: u16,
@@ -358,26 +354,26 @@ module sui_dlmm::factory {
     }
 
     public struct BinStepAdded has copy, drop {
-        factory_id: ID,
+        factory_id: sui::object::ID,
         bin_step: u16,
         admin: address,
     }
 
     public struct BinStepRemoved has copy, drop {
-        factory_id: ID,
+        factory_id: sui::object::ID,
         bin_step: u16,
         admin: address,
     }
 
     public struct ProtocolFeeRateChanged has copy, drop {
-        factory_id: ID,
+        factory_id: sui::object::ID,
         old_rate: u16,
         new_rate: u16,
         admin: address,
     }
 
     public struct AdminTransferred has copy, drop {
-        factory_id: ID,
+        factory_id: sui::object::ID,
         old_admin: address,
         new_admin: address,
     }
@@ -386,9 +382,9 @@ module sui_dlmm::factory {
 
     #[test_only]
     /// Create factory for testing
-    public fun create_test_factory(admin: address, ctx: &mut TxContext): DLMMFactory {
+    public fun create_test_factory(admin: address, ctx: &mut sui::tx_context::TxContext): DLMMFactory {
         DLMMFactory {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             pools: table::new(ctx),
             allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000],
             protocol_fee_rate: 300,

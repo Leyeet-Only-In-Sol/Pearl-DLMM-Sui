@@ -31,7 +31,7 @@ module sui_dlmm::core_tests {
                 b"TESTA",
                 b"Test Token A",
                 b"Test token A for DLMM testing",
-                option::none(),
+                std::option::none(),
                 test::ctx(scenario)
             );
 
@@ -42,19 +42,19 @@ module sui_dlmm::core_tests {
                 b"TESTB", 
                 b"Test Token B",
                 b"Test token B for DLMM testing",
-                option::none(),
+                std::option::none(),
                 test::ctx(scenario)
             );
 
             // Transfer objects properly
-            transfer::public_transfer(treasury_cap_a, ADMIN);
-            transfer::public_transfer(treasury_cap_b, ADMIN);
-            transfer::public_freeze_object(coin_metadata_a);
-            transfer::public_freeze_object(coin_metadata_b);
+            sui::transfer::public_transfer(treasury_cap_a, ADMIN);
+            sui::transfer::public_transfer(treasury_cap_b, ADMIN);
+            sui::transfer::public_freeze_object(coin_metadata_a);
+            sui::transfer::public_freeze_object(coin_metadata_b);
         };
     }
 
-    // Helper function to mint test coins
+    // Helper function to mint test coins - FIXED
     fun mint_test_coins(
         scenario: &mut Scenario,
         recipient: address,
@@ -63,14 +63,14 @@ module sui_dlmm::core_tests {
     ) {
         test::next_tx(scenario, ADMIN);
         {
-            let treasury_cap_a = test::take_from_sender<TreasuryCap<TESTA>>(scenario);
-            let treasury_cap_b = test::take_from_sender<TreasuryCap<TESTB>>(scenario);
+            let mut treasury_cap_a = test::take_from_sender<TreasuryCap<TESTA>>(scenario);
+            let mut treasury_cap_b = test::take_from_sender<TreasuryCap<TESTB>>(scenario);
             
             let coin_a = coin::mint(&mut treasury_cap_a, amount_a, test::ctx(scenario));
             let coin_b = coin::mint(&mut treasury_cap_b, amount_b, test::ctx(scenario));
             
-            transfer::public_transfer(coin_a, recipient);
-            transfer::public_transfer(coin_b, recipient);
+            sui::transfer::public_transfer(coin_a, recipient);
+            sui::transfer::public_transfer(coin_b, recipient);
             
             test::return_to_sender(scenario, treasury_cap_a);
             test::return_to_sender(scenario, treasury_cap_b);
@@ -80,7 +80,7 @@ module sui_dlmm::core_tests {
     #[test]
     fun test_bin_math_price_calculation() {
         // Test: bin_id -> price and price -> bin_id conversions
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         // Test bin step of 25 (0.25%)
         let bin_step: u16 = 25;
@@ -106,7 +106,7 @@ module sui_dlmm::core_tests {
     #[test]
     fun test_constant_sum_math() {
         // Test: P * x + y = L math within bins
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         let price: u128 = 3400 * PRICE_SCALE; // $3400 per unit
         let liquidity: u64 = 1000000; // 1M units of liquidity
@@ -148,7 +148,7 @@ module sui_dlmm::core_tests {
     #[test]  
     fun test_swap_within_bin() {
         // Test: Zero slippage swaps within a single bin
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         // Create a bin with equal liquidity
         let bin_price: u128 = 3400 * PRICE_SCALE;
@@ -182,7 +182,7 @@ module sui_dlmm::core_tests {
     #[test]
     fun test_multi_bin_swap() {
         // Test: Swaps that traverse multiple bins
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         // Create 3 consecutive bins with different prices
         let bin_step: u16 = 25;
@@ -211,7 +211,7 @@ module sui_dlmm::core_tests {
     #[test]  
     fun test_dynamic_fees() {
         // Test: Dynamic fee calculation based on volatility
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         let base_factor: u16 = 100;
         let bin_step: u16 = 25;
@@ -266,7 +266,7 @@ module sui_dlmm::core_tests {
             assert_eq(get_position_upper_bin(&position), upper_bin_id);
             assert_eq(get_position_bin_count(&position), 11); // 995-1005 inclusive
             
-            transfer::public_transfer(position, ALICE);
+            sui::transfer::public_transfer(position, ALICE);
         };
         
         test::end(scenario);
@@ -275,7 +275,7 @@ module sui_dlmm::core_tests {
     #[test]
     fun test_liquidity_distribution_strategies() {
         // Test: Different liquidity distribution strategies
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         let lower_bin: u32 = 1000;
         let upper_bin: u32 = 1010;
@@ -294,7 +294,7 @@ module sui_dlmm::core_tests {
         let expected_uniform_weight = 10000 / bin_count; // Total weight = 10000
         let mut i = 0u64;
         while (i < bin_count) {
-            let weight = *vector::borrow(&uniform_weights, i);
+            let weight = *std::vector::borrow(&uniform_weights, i);
             assert!(abs_diff_u64(weight, expected_uniform_weight) < 100);
             i = i + 1;
         };
@@ -308,8 +308,8 @@ module sui_dlmm::core_tests {
         );
         
         // Active bin should have highest weight
-        let active_weight = *vector::borrow(&curve_weights, 5); // Index 5 = bin 1005
-        let edge_weight = *vector::borrow(&curve_weights, 0);   // Index 0 = bin 1000
+        let active_weight = *std::vector::borrow(&curve_weights, 5); // Index 5 = bin 1005
+        let edge_weight = *std::vector::borrow(&curve_weights, 0);   // Index 0 = bin 1000
         assert!(active_weight > edge_weight);
         
         // Test case 3: Bid-Ask distribution (concentrated at edges)
@@ -321,9 +321,9 @@ module sui_dlmm::core_tests {
         );
         
         // Edge bins should have higher weight than middle
-        let left_edge_weight = *vector::borrow(&bid_ask_weights, 0);  // bin 1000
-        let right_edge_weight = *vector::borrow(&bid_ask_weights, 10); // bin 1010
-        let middle_weight = *vector::borrow(&bid_ask_weights, 5);     // bin 1005
+        let left_edge_weight = *std::vector::borrow(&bid_ask_weights, 0);  // bin 1000
+        let right_edge_weight = *std::vector::borrow(&bid_ask_weights, 10); // bin 1010
+        let middle_weight = *std::vector::borrow(&bid_ask_weights, 5);     // bin 1005
         
         assert!(left_edge_weight > middle_weight);
         assert!(right_edge_weight > middle_weight);
@@ -334,7 +334,7 @@ module sui_dlmm::core_tests {
     #[test]
     fun test_fee_collection() {
         // Test: Fee accumulation and collection
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         // Simulate trading activity that generates fees
         let mut total_fees_collected: u64 = 0;
@@ -365,7 +365,7 @@ module sui_dlmm::core_tests {
     #[test]  
     fun test_price_impact_calculation() {
         // Test: Price impact from large trades
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         let initial_price: u128 = 3400 * PRICE_SCALE;
         let large_trade_amount: u64 = 50000; // Large trade
@@ -385,7 +385,7 @@ module sui_dlmm::core_tests {
     #[test]
     fun test_volatility_accumulator() {
         // Test volatility accumulator functionality
-        let scenario = test::begin(ADMIN);
+        let mut scenario = test::begin(ADMIN);
         
         let initial_bin = 1000u32;
         let current_time = 1000000u64;
@@ -424,7 +424,7 @@ module sui_dlmm::core_tests {
         active_bin: u32,
         strategy: u8
     ): vector<u64> {
-        let mut weights = vector::empty<u64>();
+        let mut weights = std::vector::empty<u64>();
         let bin_count = upper_bin - lower_bin + 1;
         let base_weight = 10000 / (bin_count as u64);
         
@@ -449,7 +449,7 @@ module sui_dlmm::core_tests {
                     base_weight / 2
                 }
             };
-            vector::push_back(&mut weights, weight);
+            std::vector::push_back(&mut weights, weight);
             i = i + 1;
         };
         
@@ -463,7 +463,7 @@ module sui_dlmm::core_tests {
 
     // Test helper structs
     public struct TestPosition has key, store {
-        id: object::UID,
+        id: sui::object::UID,
         lower_bin_id: u32,
         upper_bin_id: u32,
         bin_count: u32,
@@ -474,14 +474,14 @@ module sui_dlmm::core_tests {
         coin_b: Coin<TESTB>,
         lower_bin_id: u32,
         upper_bin_id: u32,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): TestPosition {
         // Return coins to sender (simplified)
-        transfer::public_transfer(coin_a, tx_context::sender(ctx));
-        transfer::public_transfer(coin_b, tx_context::sender(ctx));
+        sui::transfer::public_transfer(coin_a, sui::tx_context::sender(ctx));
+        sui::transfer::public_transfer(coin_b, sui::tx_context::sender(ctx));
         
         TestPosition {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             lower_bin_id,
             upper_bin_id,
             bin_count: upper_bin_id - lower_bin_id + 1,

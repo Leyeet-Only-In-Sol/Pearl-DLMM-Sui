@@ -1,20 +1,18 @@
 module sui_dlmm::dlmm_pool {
-    use sui::object;
-    use sui::tx_context;
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
     use sui::table::{Self, Table};
     use sui::clock::{Self, Clock};
     use sui::event;
-    use sui::transfer;
     
-    // Import our math modules
+    // Import our modules
     use sui_dlmm::bin_math;
     use sui_dlmm::constant_sum;
     use sui_dlmm::fee_math;
     use sui_dlmm::volatility::{Self, VolatilityAccumulator};
+    use sui_dlmm::liquidity_bin::{Self, LiquidityBin}; // Import the LiquidityBin from bin module
 
-    // Error codes (CLEANED UP)
+    // Error codes
     const EINVALID_BIN_STEP: u64 = 1;
     const EINVALID_PRICE: u64 = 2;
     const EINSUFFICIENT_LIQUIDITY: u64 = 3;
@@ -22,14 +20,14 @@ module sui_dlmm::dlmm_pool {
     const EINVALID_AMOUNT: u64 = 8;
     const EPOOL_INACTIVE: u64 = 9;
 
-    /// Main DLMM pool struct
+    /// Main DLMM pool struct - Uses LiquidityBin from bin module
     public struct DLMMPool<phantom CoinA, phantom CoinB> has key {
-        id: object::UID,
+        id: sui::object::UID,
         bin_step: u16,                          // Basis points between bins
         active_bin_id: u32,                     // Current active bin ID where trades happen
         reserves_a: Balance<CoinA>,             // Total reserves of token A
         reserves_b: Balance<CoinB>,             // Total reserves of token B
-        bins: Table<u32, LiquidityBin>,         // bin_id -> LiquidityBin mapping
+        bins: Table<u32, LiquidityBin>,         // bin_id -> LiquidityBin mapping (from bin module)
         volatility_accumulator: VolatilityAccumulator, // Tracks market volatility for dynamic fees
         protocol_fee_rate: u16,                 // Protocol fee rate in basis points
         base_factor: u16,                       // Base factor for fee calculation
@@ -38,19 +36,6 @@ module sui_dlmm::dlmm_pool {
         total_volume_a: u64,                    // Cumulative volume in token A
         total_volume_b: u64,                    // Cumulative volume in token B
         is_active: bool,                        // Pool active status (circuit breaker)
-    }
-
-    /// Individual liquidity bin implementing constant sum formula: P*x + y = L
-    public struct LiquidityBin has store {
-        bin_id: u32,                    // Unique bin identifier
-        liquidity_a: u64,               // Token A reserves in this bin
-        liquidity_b: u64,               // Token B reserves in this bin
-        total_shares: u64,              // Total LP shares for this bin
-        fee_growth_a: u128,             // Accumulated fees per share for token A
-        fee_growth_b: u128,             // Accumulated fees per share for token B
-        is_active: bool,                // Whether this is the current active bin
-        price: u128,                    // Cached bin price (scaled by 2^64)
-        last_update_time: u64,          // Last time bin was updated
     }
 
     /// Result of swap operation with detailed metrics
@@ -74,7 +59,7 @@ module sui_dlmm::dlmm_pool {
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): DLMMPool<CoinA, CoinB> {
         assert!(bin_step > 0 && bin_step <= 10000, EINVALID_BIN_STEP);
         assert!(initial_price > 0, EINVALID_PRICE);
@@ -93,7 +78,7 @@ module sui_dlmm::dlmm_pool {
 
         // Create the pool
         let mut pool = DLMMPool {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             bin_step,
             active_bin_id: initial_bin_id,
             reserves_a: coin::into_balance(coin_a),
@@ -109,59 +94,49 @@ module sui_dlmm::dlmm_pool {
             is_active: true,
         };
 
-        // Initialize active bin with provided liquidity
+        // Initialize active bin with provided liquidity using bin module
         if (balance::value(&pool.reserves_a) > 0 || balance::value(&pool.reserves_b) > 0) {
-            initialize_active_bin(&mut pool, initial_price, current_time);
+            initialize_active_bin(&mut pool, current_time);
         };
 
         // Emit pool creation event
         event::emit(PoolCreated {
-            pool_id: object::uid_to_inner(&pool.id),
+            pool_id: sui::object::uid_to_inner(&pool.id),
             bin_step,
             initial_bin_id,
             initial_price,
-            creator: tx_context::sender(ctx),
+            creator: sui::tx_context::sender(ctx),
             timestamp: current_time,
         });
 
         pool
     }
 
-    /// Initialize the active bin with initial liquidity
+    /// Initialize the active bin with initial liquidity using bin module
     fun initialize_active_bin<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
-        price: u128,
         current_time: u64
     ) {
         let reserve_a = balance::value(&pool.reserves_a);
         let reserve_b = balance::value(&pool.reserves_b);
 
-        // Calculate initial shares using constant sum formula
-        let initial_shares = if (reserve_a == 0 && reserve_b == 0) {
-            0
-        } else {
-            // Use liquidity formula: L = P*x + y
-            constant_sum::calculate_liquidity_from_amounts(reserve_a, reserve_b, price)
-        };
+        // Use bin module to create initialized bin
+        let mut bin = liquidity_bin::initialize_bin_with_liquidity(
+            pool.active_bin_id,
+            pool.bin_step,
+            reserve_a,
+            reserve_b,
+            current_time
+        );
 
-        let bin = LiquidityBin {
-            bin_id: pool.active_bin_id,
-            liquidity_a: reserve_a,
-            liquidity_b: reserve_b,
-            total_shares: initial_shares,
-            fee_growth_a: 0,
-            fee_growth_b: 0,
-            is_active: true,
-            price,
-            last_update_time: current_time,
-        };
-
+        // Set as active bin
+        liquidity_bin::set_bin_active(&mut bin, true);
         table::add(&mut pool.bins, pool.active_bin_id, bin);
     }
 
     /// Share the pool object (entry function for deployment)
     public entry fun share_pool<CoinA, CoinB>(pool: DLMMPool<CoinA, CoinB>) {
-        transfer::share_object(pool);
+        sui::transfer::share_object(pool);
     }
 
     // ==================== Core Swap Implementation ====================
@@ -173,7 +148,7 @@ module sui_dlmm::dlmm_pool {
         min_amount_out: u64,
         zero_for_one: bool,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Coin<CoinB> {
         assert!(pool.is_active, EPOOL_INACTIVE);
         
@@ -207,8 +182,8 @@ module sui_dlmm::dlmm_pool {
 
         // Emit comprehensive swap event
         event::emit(SwapExecuted {
-            pool_id: object::uid_to_inner(&pool.id),
-            user: tx_context::sender(ctx),
+            pool_id: sui::object::uid_to_inner(&pool.id),
+            user: sui::tx_context::sender(ctx),
             amount_in,
             amount_out: swap_result.amount_out,
             zero_for_one,
@@ -223,7 +198,7 @@ module sui_dlmm::dlmm_pool {
         coin::from_balance(output_balance, ctx)
     }
 
-    /// Execute multi-bin swap with dynamic fee calculation
+    /// Execute multi-bin swap with dynamic fee calculation - Using bin module
     fun execute_multi_bin_swap<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         amount_in: u64,
@@ -242,50 +217,27 @@ module sui_dlmm::dlmm_pool {
         // Traverse bins until swap is complete or we hit limits
         while (remaining_amount_in > 0 && bins_crossed < 100) { // Safety limit
             
-            // Get or create current bin
+            // Get or create current bin using bin module
             if (!table::contains(&pool.bins, current_bin_id)) {
-                create_empty_bin(pool, current_bin_id, current_time);
+                let empty_bin = liquidity_bin::create_bin(current_bin_id, pool.bin_step, current_time);
+                table::add(&mut pool.bins, current_bin_id, empty_bin);
             };
 
             let bin = table::borrow_mut(&mut pool.bins, current_bin_id);
             
-            // Skip empty bins
-            if (bin.liquidity_a == 0 && bin.liquidity_b == 0) {
+            // Skip empty bins using bin module functions
+            if (liquidity_bin::is_bin_empty(bin)) {
                 current_bin_id = bin_math::get_next_bin_id(current_bin_id, zero_for_one);
                 bins_crossed = bins_crossed + 1;
                 continue
             };
 
-            // Calculate maximum amount we can swap in this bin
-            let max_swap_amount = constant_sum::calculate_max_swap_amount(
-                bin.liquidity_a,
-                bin.liquidity_b,
-                zero_for_one,
-                bin.price
-            );
-
-            if (max_swap_amount == 0) {
-                // No capacity in this direction, move to next bin
+            // Check if bin has liquidity for this swap direction
+            if (!liquidity_bin::has_liquidity_for_swap(bin, zero_for_one)) {
                 current_bin_id = bin_math::get_next_bin_id(current_bin_id, zero_for_one);
                 bins_crossed = bins_crossed + 1;
                 continue
             };
-
-            // Determine actual amount to swap in this bin
-            let amount_to_swap = if (remaining_amount_in <= max_swap_amount) {
-                remaining_amount_in
-            } else {
-                max_swap_amount
-            };
-
-            // Execute zero-slippage swap within this bin
-            let (amount_out, bin_exhausted) = constant_sum::swap_within_bin(
-                bin.liquidity_a,
-                bin.liquidity_b,
-                amount_to_swap,
-                zero_for_one,
-                bin.price
-            );
 
             // Calculate dynamic fee for this portion
             let current_fee_rate = fee_math::calculate_dynamic_fee(
@@ -293,27 +245,24 @@ module sui_dlmm::dlmm_pool {
                 pool.bin_step,
                 bins_crossed
             );
-            let fee_amount = fee_math::calculate_fee_amount(amount_to_swap, current_fee_rate);
 
-            // Update bin reserves after swap
-            let (new_liquidity_a, new_liquidity_b) = constant_sum::update_reserves_after_swap(
-                bin.liquidity_a,
-                bin.liquidity_b,
-                amount_to_swap,
-                amount_out,
-                zero_for_one
+            // Execute swap within this bin using bin module
+            let bin_swap_result = liquidity_bin::swap_within_bin(
+                bin,
+                remaining_amount_in,
+                zero_for_one,
+                current_fee_rate,
+                current_time
             );
 
-            // Update bin state
-            bin.liquidity_a = new_liquidity_a;
-            bin.liquidity_b = new_liquidity_b;
-            bin.last_update_time = current_time;
-
-            // Accumulate fees in bin (for LP fee distribution)
-            update_bin_fees(bin, fee_amount, zero_for_one);
+            // Extract results using getter functions
+            let amount_out = liquidity_bin::get_amount_out(&bin_swap_result);
+            let amount_consumed = liquidity_bin::get_amount_consumed(&bin_swap_result);
+            let fee_amount = liquidity_bin::get_fee_amount(&bin_swap_result);
+            let bin_exhausted = liquidity_bin::is_bin_exhausted(&bin_swap_result);
 
             // Update running totals
-            remaining_amount_in = remaining_amount_in - amount_to_swap;
+            remaining_amount_in = remaining_amount_in - amount_consumed;
             total_amount_out = total_amount_out + amount_out;
             total_fee = total_fee + fee_amount;
 
@@ -355,48 +304,12 @@ module sui_dlmm::dlmm_pool {
         }
     }
 
-    /// Create an empty bin at specified bin_id
-    fun create_empty_bin<CoinA, CoinB>(
-        pool: &mut DLMMPool<CoinA, CoinB>,
-        bin_id: u32,
-        current_time: u64
-    ) {
-        let price = bin_math::calculate_bin_price(bin_id, pool.bin_step);
-        
-        let bin = LiquidityBin {
-            bin_id,
-            liquidity_a: 0,
-            liquidity_b: 0,
-            total_shares: 0,
-            fee_growth_a: 0,
-            fee_growth_b: 0,
-            is_active: false,
-            price,
-            last_update_time: current_time,
-        };
-
-        table::add(&mut pool.bins, bin_id, bin);
-    }
-
-    /// Update bin fee accumulation for LP rewards
-    fun update_bin_fees(bin: &mut LiquidityBin, fee_amount: u64, zero_for_one: bool) {
-        if (bin.total_shares > 0) {
-            let fee_per_share = (fee_amount as u128) * 1000000000000000000u128 / (bin.total_shares as u128); // Scale by 10^18
-            
-            if (zero_for_one) {
-                bin.fee_growth_a = bin.fee_growth_a + fee_per_share;
-            } else {
-                bin.fee_growth_b = bin.fee_growth_b + fee_per_share;
-            };
-        };
-    }
-
     /// Update which bin is currently active
     fun update_active_bin<CoinA, CoinB>(pool: &mut DLMMPool<CoinA, CoinB>, new_active_bin_id: u32) {
         // Deactivate old active bin
         if (table::contains(&pool.bins, pool.active_bin_id)) {
             let old_bin = table::borrow_mut(&mut pool.bins, pool.active_bin_id);
-            old_bin.is_active = false;
+            liquidity_bin::set_bin_active(old_bin, false);
         };
 
         pool.active_bin_id = new_active_bin_id;
@@ -404,7 +317,7 @@ module sui_dlmm::dlmm_pool {
         // Activate new bin
         if (table::contains(&pool.bins, new_active_bin_id)) {
             let new_bin = table::borrow_mut(&mut pool.bins, new_active_bin_id);
-            new_bin.is_active = true;
+            liquidity_bin::set_bin_active(new_bin, true);
         };
     }
 
@@ -424,14 +337,14 @@ module sui_dlmm::dlmm_pool {
 
     // ==================== Liquidity Management ====================
 
-    /// Add liquidity to a specific bin
+    /// Add liquidity to a specific bin using bin module
     public fun add_liquidity_to_bin<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         bin_id: u32,
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): u64 { // Returns LP shares minted
         assert!(pool.is_active, EPOOL_INACTIVE);
         
@@ -442,112 +355,83 @@ module sui_dlmm::dlmm_pool {
         // Validate at least one token is provided
         assert!(amount_a > 0 || amount_b > 0, EINVALID_AMOUNT);
 
-        // Get or create bin
+        // Get or create bin using bin module
         if (!table::contains(&pool.bins, bin_id)) {
-            create_empty_bin(pool, bin_id, current_time);
+            let new_bin = liquidity_bin::create_bin(bin_id, pool.bin_step, current_time);
+            table::add(&mut pool.bins, bin_id, new_bin);
         };
 
         let bin = table::borrow_mut(&mut pool.bins, bin_id);
         
-        // Calculate shares to mint based on constant sum formula
-        let liquidity_to_add = constant_sum::calculate_liquidity_from_amounts(
+        // Add liquidity using bin module
+        let liquidity_result = liquidity_bin::add_liquidity_to_bin(
+            bin,
             amount_a,
             amount_b,
-            bin.price
+            current_time
         );
 
-        let shares_to_mint = if (bin.total_shares == 0) {
-            // First liquidity provider - mint shares equal to liquidity
-            liquidity_to_add
-        } else {
-            // Calculate proportional shares
-            let current_bin_liquidity = constant_sum::calculate_liquidity_from_amounts(
-                bin.liquidity_a,
-                bin.liquidity_b,
-                bin.price
-            );
-            
-            if (current_bin_liquidity == 0) {
-                liquidity_to_add // Treat as first LP if current liquidity is zero
-            } else {
-                (liquidity_to_add * bin.total_shares) / current_bin_liquidity
-            }
-        };
-
-        // Update bin state
-        bin.liquidity_a = bin.liquidity_a + amount_a;
-        bin.liquidity_b = bin.liquidity_b + amount_b;
-        bin.total_shares = bin.total_shares + shares_to_mint;
-        bin.last_update_time = current_time;
+        // Extract shares minted using getter function
+        let shares_minted = liquidity_bin::extract_shares_delta(&liquidity_result);
 
         // Update pool reserves
         balance::join(&mut pool.reserves_a, coin::into_balance(coin_a));
         balance::join(&mut pool.reserves_b, coin::into_balance(coin_b));
 
-        // Emit liquidity added event
+        // Emit pool-level liquidity added event
         event::emit(LiquidityAdded {
-            pool_id: object::uid_to_inner(&pool.id),
+            pool_id: sui::object::uid_to_inner(&pool.id),
             bin_id,
-            user: tx_context::sender(ctx),
+            user: sui::tx_context::sender(ctx),
             amount_a,
             amount_b,
-            shares_minted: shares_to_mint,
+            shares_minted,
             timestamp: current_time,
         });
 
-        shares_to_mint
+        shares_minted
     }
 
-    /// Remove liquidity from a specific bin
+    /// Remove liquidity from a specific bin using bin module
     public fun remove_liquidity_from_bin<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         bin_id: u32,
         shares_to_burn: u64,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): (Coin<CoinA>, Coin<CoinB>, u64, u64) { // Returns (coin_a, coin_b, fee_a, fee_b)
         assert!(table::contains(&pool.bins, bin_id), EINSUFFICIENT_LIQUIDITY);
         assert!(shares_to_burn > 0, EINVALID_AMOUNT);
         
         let bin = table::borrow_mut(&mut pool.bins, bin_id);
-        assert!(shares_to_burn <= bin.total_shares, EINSUFFICIENT_LIQUIDITY);
-
         let current_time = clock::timestamp_ms(clock);
 
-        // Calculate proportional amounts to return
-        let amount_a = if (bin.total_shares > 0) {
-            (bin.liquidity_a * shares_to_burn) / bin.total_shares
-        } else {
-            0
-        };
-        
-        let amount_b = if (bin.total_shares > 0) {
-            (bin.liquidity_b * shares_to_burn) / bin.total_shares
-        } else {
-            0
-        };
+        // Remove liquidity using bin module
+        let liquidity_result = liquidity_bin::remove_liquidity_from_bin(
+            bin,
+            shares_to_burn,
+            current_time
+        );
 
-        // Calculate accumulated fees for this position
-        let (fee_a, fee_b) = calculate_accumulated_fees(bin, shares_to_burn);
+        // Extract amounts using getter functions
+        let (amount_a, amount_b) = liquidity_bin::extract_amount_deltas(&liquidity_result);
+        let shares_burned = liquidity_bin::extract_shares_delta(&liquidity_result);
 
-        // Update bin state
-        bin.liquidity_a = bin.liquidity_a - amount_a;
-        bin.liquidity_b = bin.liquidity_b - amount_b;
-        bin.total_shares = bin.total_shares - shares_to_burn;
-        bin.last_update_time = current_time;
+        // Calculate accumulated fees using bin module
+        let (fee_a, fee_b) = liquidity_bin::extract_fees(&liquidity_result);
 
         // Extract coins from pool reserves
         let balance_a = balance::split(&mut pool.reserves_a, amount_a + fee_a);
         let balance_b = balance::split(&mut pool.reserves_b, amount_b + fee_b);
 
-        // Emit liquidity removal event
+        // Emit pool-level liquidity removal event
         event::emit(LiquidityRemoved {
-            pool_id: object::uid_to_inner(&pool.id),
+            pool_id: sui::object::uid_to_inner(&pool.id),
             bin_id,
-            user: tx_context::sender(ctx),
+            user: sui::tx_context::sender(ctx),
             amount_a,
             amount_b,
-            shares_burned: shares_to_burn,
+            shares_burned,
             fee_a,
             fee_b,
             timestamp: current_time,
@@ -561,17 +445,12 @@ module sui_dlmm::dlmm_pool {
         )
     }
 
-    /// Calculate accumulated fees for LP position
-    fun calculate_accumulated_fees(bin: &LiquidityBin, shares: u64): (u64, u64) {
-        if (shares == 0 || bin.total_shares == 0) return (0, 0);
-
-        let fee_a = ((bin.fee_growth_a * (shares as u128)) / 1000000000000000000u128) as u64; // Unscale
-        let fee_b = ((bin.fee_growth_b * (shares as u128)) / 1000000000000000000u128) as u64; // Unscale
-
-        (fee_a, fee_b)
-    }
-
     // ==================== View Functions ====================
+
+    /// Get pool ID (needed by position module)
+    public fun get_pool_id<CoinA, CoinB>(pool: &DLMMPool<CoinA, CoinB>): sui::object::ID {
+        sui::object::uid_to_inner(&pool.id)
+    }
 
     /// Get comprehensive pool information
     public fun get_pool_info<CoinA, CoinB>(
@@ -589,21 +468,23 @@ module sui_dlmm::dlmm_pool {
         )
     }
 
-    /// Get detailed bin information (FIXED - simpler return type)
+    /// Get detailed bin information using bin module
     public fun get_bin_info<CoinA, CoinB>(
         pool: &DLMMPool<CoinA, CoinB>,
         bin_id: u32
     ): (bool, u64, u64, u64, u128, u128, u128) { // (exists, liquidity_a, liquidity_b, shares, price, fee_growth_a, fee_growth_b)
         if (table::contains(&pool.bins, bin_id)) {
             let bin = table::borrow(&pool.bins, bin_id);
+            let (_, liquidity_a, liquidity_b, total_shares, price, _) = liquidity_bin::get_bin_info(bin);
+            let (fee_growth_a, fee_growth_b) = liquidity_bin::get_bin_fee_growth(bin);
             (
                 true,                   // exists
-                bin.liquidity_a,
-                bin.liquidity_b,
-                bin.total_shares,
-                bin.price,
-                bin.fee_growth_a,
-                bin.fee_growth_b
+                liquidity_a,
+                liquidity_b,
+                total_shares,
+                price,
+                fee_growth_a,
+                fee_growth_b
             )
         } else {
             (false, 0, 0, 0, 0, 0, 0)
@@ -622,7 +503,7 @@ module sui_dlmm::dlmm_pool {
         volatility::get_volatility_stats(&pool.volatility_accumulator)
     }
 
-    /// Quote swap without executing (simulation) (FIXED - simpler return)
+    /// Quote swap without executing (simulation) using bin module
     public fun quote_swap<CoinA, CoinB>(
         pool: &DLMMPool<CoinA, CoinB>,
         amount_in: u64,
@@ -631,7 +512,7 @@ module sui_dlmm::dlmm_pool {
         simulate_swap(pool, amount_in, zero_for_one)
     }
 
-    /// Simulate swap for quotation (read-only, no state changes)
+    /// Simulate swap for quotation using bin module (read-only, no state changes)
     fun simulate_swap<CoinA, CoinB>(
         pool: &DLMMPool<CoinA, CoinB>,
         amount_in: u64,
@@ -650,12 +531,17 @@ module sui_dlmm::dlmm_pool {
             if (table::contains(&pool.bins, current_bin_id)) {
                 let bin = table::borrow(&pool.bins, current_bin_id);
                 
-                if (bin.liquidity_a > 0 || bin.liquidity_b > 0) {
+                // Use bin module to check liquidity
+                if (!liquidity_bin::is_bin_empty(bin) && 
+                    liquidity_bin::has_liquidity_for_swap(bin, zero_for_one)) {
+                    
+                    let (_, liquidity_a, liquidity_b, _, price, _) = liquidity_bin::get_bin_info(bin);
+                    
                     let max_swap_amount = constant_sum::calculate_max_swap_amount(
-                        bin.liquidity_a,
-                        bin.liquidity_b,
+                        liquidity_a,
+                        liquidity_b,
                         zero_for_one,
-                        bin.price
+                        price
                     );
 
                     if (max_swap_amount > 0) {
@@ -666,11 +552,11 @@ module sui_dlmm::dlmm_pool {
                         };
 
                         let (amount_out, bin_exhausted) = constant_sum::swap_within_bin(
-                            bin.liquidity_a,
-                            bin.liquidity_b,
+                            liquidity_a,
+                            liquidity_b,
                             amount_to_swap,
                             zero_for_one,
-                            bin.price
+                            price
                         );
 
                         // Calculate fees
@@ -708,16 +594,16 @@ module sui_dlmm::dlmm_pool {
     public fun update_base_factor<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         new_base_factor: u16,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         let old_factor = pool.base_factor;
         pool.base_factor = new_base_factor;
         
         event::emit(BaseFeeFactorUpdated {
-            pool_id: object::uid_to_inner(&pool.id),
+            pool_id: sui::object::uid_to_inner(&pool.id),
             old_factor,
             new_factor: new_base_factor,
-            admin: tx_context::sender(ctx),
+            admin: sui::tx_context::sender(ctx),
         });
     }
 
@@ -725,14 +611,14 @@ module sui_dlmm::dlmm_pool {
     public fun set_pool_active_status<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         active: bool,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         pool.is_active = active;
         
         event::emit(PoolStatusChanged {
-            pool_id: object::uid_to_inner(&pool.id),
+            pool_id: sui::object::uid_to_inner(&pool.id),
             is_active: active,
-            admin: tx_context::sender(ctx),
+            admin: sui::tx_context::sender(ctx),
         });
     }
 
@@ -740,7 +626,7 @@ module sui_dlmm::dlmm_pool {
     public fun reset_volatility<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         clock: &Clock,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
         let current_time = clock::timestamp_ms(clock);
         pool.volatility_accumulator = volatility::reset_volatility_accumulator(
@@ -749,8 +635,8 @@ module sui_dlmm::dlmm_pool {
         );
         
         event::emit(VolatilityReset {
-            pool_id: object::uid_to_inner(&pool.id),
-            admin: tx_context::sender(ctx),
+            pool_id: sui::object::uid_to_inner(&pool.id),
+            admin: sui::tx_context::sender(ctx),
             timestamp: current_time,
         });
     }
@@ -762,15 +648,15 @@ module sui_dlmm::dlmm_pool {
         (balance::value(&pool.reserves_a), balance::value(&pool.reserves_b))
     }
 
-    /// Get bins around active bin (FIXED - simpler structure)
+    /// Get bins around active bin using bin module
     public fun get_bins_around_active<CoinA, CoinB>(
         pool: &DLMMPool<CoinA, CoinB>,
         range: u32 // Number of bins on each side
     ): (vector<u32>, vector<u64>, vector<u64>, vector<u128>) { // (bin_ids, liquidity_a_vec, liquidity_b_vec, prices)
-        let mut bin_ids = vector::empty<u32>();
-        let mut liquidity_a_vec = vector::empty<u64>();
-        let mut liquidity_b_vec = vector::empty<u64>();
-        let mut prices = vector::empty<u128>();
+        let mut bin_ids = std::vector::empty<u32>();
+        let mut liquidity_a_vec = std::vector::empty<u64>();
+        let mut liquidity_b_vec = std::vector::empty<u64>();
+        let mut prices = std::vector::empty<u128>();
         
         let start_bin = if (pool.active_bin_id >= range) {
             pool.active_bin_id - range
@@ -781,18 +667,19 @@ module sui_dlmm::dlmm_pool {
 
         let mut current_bin = start_bin;
         while (current_bin <= end_bin) {
-            vector::push_back(&mut bin_ids, current_bin);
+            std::vector::push_back(&mut bin_ids, current_bin);
             
             if (table::contains(&pool.bins, current_bin)) {
                 let bin = table::borrow(&pool.bins, current_bin);
-                vector::push_back(&mut liquidity_a_vec, bin.liquidity_a);
-                vector::push_back(&mut liquidity_b_vec, bin.liquidity_b);
-                vector::push_back(&mut prices, bin.price);
+                let (_, liquidity_a, liquidity_b, _, price, _) = liquidity_bin::get_bin_info(bin);
+                std::vector::push_back(&mut liquidity_a_vec, liquidity_a);
+                std::vector::push_back(&mut liquidity_b_vec, liquidity_b);
+                std::vector::push_back(&mut prices, price);
             } else {
                 let price = bin_math::calculate_bin_price(current_bin, pool.bin_step);
-                vector::push_back(&mut liquidity_a_vec, 0);
-                vector::push_back(&mut liquidity_b_vec, 0);
-                vector::push_back(&mut prices, price);
+                std::vector::push_back(&mut liquidity_a_vec, 0);
+                std::vector::push_back(&mut liquidity_b_vec, 0);
+                std::vector::push_back(&mut prices, price);
             };
             current_bin = current_bin + 1;
         };
@@ -800,7 +687,7 @@ module sui_dlmm::dlmm_pool {
         (bin_ids, liquidity_a_vec, liquidity_b_vec, prices)
     }
 
-    /// Check if bin exists and has liquidity
+    /// Check if bin exists and has liquidity using bin module
     public fun bin_has_liquidity<CoinA, CoinB>(
         pool: &DLMMPool<CoinA, CoinB>,
         bin_id: u32
@@ -808,7 +695,7 @@ module sui_dlmm::dlmm_pool {
         if (!table::contains(&pool.bins, bin_id)) return false;
         
         let bin = table::borrow(&pool.bins, bin_id);
-        bin.liquidity_a > 0 || bin.liquidity_b > 0
+        !liquidity_bin::is_bin_empty(bin)
     }
 
     /// Get pool statistics for analytics
@@ -825,13 +712,12 @@ module sui_dlmm::dlmm_pool {
         )
     }
 
-    /// Count bins with liquidity
+    /// Count bins with liquidity using bin module
     fun count_active_bins<CoinA, CoinB>(pool: &DLMMPool<CoinA, CoinB>): u32 {
-        // Note: In a real implementation, you'd want to track this more efficiently
-        // For now, this is a placeholder that returns 1 if active bin has liquidity
+        // For now, simple implementation checking just active bin
         if (table::contains(&pool.bins, pool.active_bin_id)) {
             let bin = table::borrow(&pool.bins, pool.active_bin_id);
-            if (bin.liquidity_a > 0 || bin.liquidity_b > 0) 1 else 0
+            if (!liquidity_bin::is_bin_empty(bin)) 1 else 0
         } else {
             0
         }
@@ -844,40 +730,10 @@ module sui_dlmm::dlmm_pool {
         if (a >= b) a - b else b - a
     }
 
-    /// Update bin fees after collecting protocol fee
-    public fun update_bin_fees_after_protocol_collection<CoinA, CoinB>(
-        pool: &mut DLMMPool<CoinA, CoinB>,
-        bin_id: u32,
-        protocol_fee_a: u64,
-        protocol_fee_b: u64
-    ) {
-        if (table::contains(&pool.bins, bin_id)) {
-            let bin = table::borrow_mut(&mut pool.bins, bin_id);
-            
-            // Adjust fee growth to account for protocol fee collection
-            if (bin.total_shares > 0) {
-                let fee_reduction_a = (protocol_fee_a as u128) * 1000000000000000000u128 / (bin.total_shares as u128);
-                let fee_reduction_b = (protocol_fee_b as u128) * 1000000000000000000u128 / (bin.total_shares as u128);
-                
-                bin.fee_growth_a = if (bin.fee_growth_a >= fee_reduction_a) {
-                    bin.fee_growth_a - fee_reduction_a
-                } else {
-                    0
-                };
-                
-                bin.fee_growth_b = if (bin.fee_growth_b >= fee_reduction_b) {
-                    bin.fee_growth_b - fee_reduction_b
-                } else {
-                    0
-                };
-            };
-        };
-    }
-
     // ==================== Events ====================
 
     public struct PoolCreated has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         bin_step: u16,
         initial_bin_id: u32,
         initial_price: u128,
@@ -886,7 +742,7 @@ module sui_dlmm::dlmm_pool {
     }
 
     public struct SwapExecuted has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         user: address,
         amount_in: u64,
         amount_out: u64,
@@ -900,7 +756,7 @@ module sui_dlmm::dlmm_pool {
     }
 
     public struct LiquidityAdded has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         bin_id: u32,
         user: address,
         amount_a: u64,
@@ -910,7 +766,7 @@ module sui_dlmm::dlmm_pool {
     }
 
     public struct LiquidityRemoved has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         bin_id: u32,
         user: address,
         amount_a: u64,
@@ -922,20 +778,20 @@ module sui_dlmm::dlmm_pool {
     }
 
     public struct BaseFeeFactorUpdated has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         old_factor: u16,
         new_factor: u16,
         admin: address,
     }
 
     public struct PoolStatusChanged has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         is_active: bool,
         admin: address,
     }
 
     public struct VolatilityReset has copy, drop {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         admin: address,
         timestamp: u64,
     }
@@ -943,18 +799,18 @@ module sui_dlmm::dlmm_pool {
     // ==================== Test Helpers ====================
 
     #[test_only]
-    /// Create test pool for unit testing
+    /// Create test pool for unit testing using bin module
     public fun create_test_pool<CoinA, CoinB>(
         bin_step: u16,
         initial_bin_id: u32,
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): DLMMPool<CoinA, CoinB> {
         let volatility_accumulator = volatility::new_volatility_accumulator(initial_bin_id, 0);
         
         DLMMPool {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             bin_step,
             active_bin_id: initial_bin_id,
             reserves_a: coin::into_balance(coin_a),
@@ -972,13 +828,13 @@ module sui_dlmm::dlmm_pool {
     }
 
     #[test_only]
-    /// Get pool ID for testing
-    public fun get_pool_id<CoinA, CoinB>(pool: &DLMMPool<CoinA, CoinB>): object::ID {
-        object::uid_to_inner(&pool.id)
+    /// Get pool ID for testing (renamed to avoid duplicate)
+    public fun get_test_pool_id<CoinA, CoinB>(pool: &DLMMPool<CoinA, CoinB>): sui::object::ID {
+        get_pool_id(pool)
     }
 
     #[test_only]
-    /// Test simulation function (FIXED - simpler return)
+    /// Test simulation function
     public fun test_simulate_swap<CoinA, CoinB>(
         pool: &DLMMPool<CoinA, CoinB>,
         amount_in: u64,
@@ -988,28 +844,39 @@ module sui_dlmm::dlmm_pool {
     }
 
     #[test_only]
-    /// Initialize test bin with liquidity
+    /// Initialize test bin with liquidity using bin module
     public fun initialize_test_bin<CoinA, CoinB>(
         pool: &mut DLMMPool<CoinA, CoinB>,
         bin_id: u32,
         liquidity_a: u64,
         liquidity_b: u64
     ) {
-        let price = bin_math::calculate_bin_price(bin_id, pool.bin_step);
-        let shares = constant_sum::calculate_liquidity_from_amounts(liquidity_a, liquidity_b, price);
-        
-        let bin = LiquidityBin {
+        let test_bin = liquidity_bin::initialize_bin_with_liquidity(
             bin_id,
+            pool.bin_step,
             liquidity_a,
             liquidity_b,
-            total_shares: shares,
-            fee_growth_a: 0,
-            fee_growth_b: 0,
-            is_active: bin_id == pool.active_bin_id,
-            price,
-            last_update_time: 0,
-        };
+            0 // current_time for test
+        );
+        
+        table::add(&mut pool.bins, bin_id, test_bin);
+    }
 
-        table::add(&mut pool.bins, bin_id, bin);
+    #[test_only]
+    /// Get bin from pool for testing
+    public fun get_test_bin<CoinA, CoinB>(
+        pool: &DLMMPool<CoinA, CoinB>,
+        bin_id: u32
+    ): &LiquidityBin {
+        table::borrow(&pool.bins, bin_id)
+    }
+
+    #[test_only]
+    /// Get mutable bin from pool for testing
+    public fun get_test_bin_mut<CoinA, CoinB>(
+        pool: &mut DLMMPool<CoinA, CoinB>,
+        bin_id: u32
+    ): &mut LiquidityBin {
+        table::borrow_mut(&mut pool.bins, bin_id)
     }
 }

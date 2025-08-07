@@ -6,7 +6,6 @@ module sui_dlmm::position {
     
     // Import core modules
     use sui_dlmm::dlmm_pool::{Self, DLMMPool};
-    use sui_dlmm::bin_math;
 
     // Error codes
     const EINVALID_RANGE: u64 = 1;
@@ -23,8 +22,8 @@ module sui_dlmm::position {
 
     /// Multi-bin liquidity position (NFT)
     public struct Position has key, store {
-        id: object::UID,
-        pool_id: object::ID,
+        id: sui::object::UID,
+        pool_id: sui::object::ID,
         lower_bin_id: u32,
         upper_bin_id: u32,
         bin_positions: Table<u32, BinPosition>,
@@ -59,8 +58,8 @@ module sui_dlmm::position {
     // ==================== Events ====================
 
     public struct PositionCreated has copy, drop {
-        position_id: object::ID,
-        pool_id: object::ID,
+        position_id: sui::object::ID,
+        pool_id: sui::object::ID,
         owner: address,
         lower_bin_id: u32,
         upper_bin_id: u32,
@@ -71,8 +70,8 @@ module sui_dlmm::position {
     }
 
     public struct LiquidityAddedToPosition has copy, drop {
-        position_id: object::ID,
-        pool_id: object::ID,
+        position_id: sui::object::ID,
+        pool_id: sui::object::ID,
         amount_a: u64,
         amount_b: u64,
         owner: address,
@@ -80,8 +79,8 @@ module sui_dlmm::position {
     }
 
     public struct LiquidityRemovedFromPosition has copy, drop {
-        position_id: object::ID,
-        pool_id: object::ID,
+        position_id: sui::object::ID,
+        pool_id: sui::object::ID,
         percentage: u8,
         amount_a: u64,
         amount_b: u64,
@@ -90,8 +89,8 @@ module sui_dlmm::position {
     }
 
     public struct FeesCollected has copy, drop {
-        position_id: object::ID,
-        pool_id: object::ID,
+        position_id: sui::object::ID,
+        pool_id: sui::object::ID,
         fee_a: u64,
         fee_b: u64,
         owner: address,
@@ -99,8 +98,8 @@ module sui_dlmm::position {
     }
 
     public struct PositionRebalanced has copy, drop {
-        position_id: object::ID,
-        pool_id: object::ID,
+        position_id: sui::object::ID,
+        pool_id: sui::object::ID,
         owner: address,
         timestamp: u64,
     }
@@ -137,7 +136,7 @@ module sui_dlmm::position {
         position: &mut Position,
         pool: &mut DLMMPool<CoinA, CoinB>,
         clock: &Clock,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): (Coin<CoinA>, Coin<CoinB>) {
         let mut total_fees_a = 0u64;
         let mut total_fees_b = 0u64;
@@ -180,7 +179,7 @@ module sui_dlmm::position {
         let fee_coin_b = coin::zero<CoinB>(ctx);
 
         event::emit(FeesCollected {
-            position_id: object::uid_to_inner(&position.id),
+            position_id: sui::object::uid_to_inner(&position.id),
             pool_id: position.pool_id,
             fee_a: total_fees_a,
             fee_b: total_fees_b,
@@ -189,20 +188,6 @@ module sui_dlmm::position {
         });
 
         (fee_coin_a, fee_coin_b)
-    }
-
-    /// Update bin position after partial removal
-    fun update_bin_position_after_removal(
-        bin_positions: &mut Table<u32, BinPosition>,
-        bin_id: u32,
-        shares_removed: u64,
-        percentage: u8
-    ) {
-        let bin_position = table::borrow_mut(bin_positions, bin_id);
-        
-        bin_position.shares = bin_position.shares - shares_removed;
-        bin_position.liquidity_a = (bin_position.liquidity_a * (100 - percentage as u64)) / 100;
-        bin_position.liquidity_b = (bin_position.liquidity_b * (100 - percentage as u64)) / 100;
     }
 
     // ==================== Position Creation ====================
@@ -214,7 +199,7 @@ module sui_dlmm::position {
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Position {
         assert!(config.lower_bin_id <= config.upper_bin_id, EINVALID_RANGE);
         assert!(config.strategy_type <= 2, EINVALID_STRATEGY);
@@ -225,11 +210,11 @@ module sui_dlmm::position {
 
         let current_time = clock::timestamp_ms(clock);
         let pool_id = dlmm_pool::get_pool_id(pool);
-        let owner = tx_context::sender(ctx);
+        let owner = sui::tx_context::sender(ctx);
 
         // Create position structure
         let position = Position {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             pool_id,
             lower_bin_id: config.lower_bin_id,
             upper_bin_id: config.upper_bin_id,
@@ -245,11 +230,11 @@ module sui_dlmm::position {
         };
 
         // For now, return coins to owner (simplified implementation)
-        transfer::public_transfer(coin_a, owner);
-        transfer::public_transfer(coin_b, owner);
+        sui::transfer::public_transfer(coin_a, owner);
+        sui::transfer::public_transfer(coin_b, owner);
 
         event::emit(PositionCreated {
-            position_id: object::uid_to_inner(&position.id),
+            position_id: sui::object::uid_to_inner(&position.id),
             pool_id,
             owner,
             lower_bin_id: config.lower_bin_id,
@@ -273,18 +258,18 @@ module sui_dlmm::position {
     ): vector<u64> {
         let bin_count = upper_bin - lower_bin + 1;
         
-        if (vector::length(&custom_weights) == (bin_count as u64)) {
+        if (std::vector::length(&custom_weights) == (bin_count as u64)) {
             return custom_weights
         };
 
-        let mut weights = vector::empty<u64>();
+        let mut weights = std::vector::empty<u64>();
         let total_weight = 10000u64;
 
         if (strategy_type == STRATEGY_UNIFORM) {
             let weight_per_bin = total_weight / (bin_count as u64);
             let mut i = 0u32;
             while (i < bin_count) {
-                vector::push_back(&mut weights, weight_per_bin);
+                std::vector::push_back(&mut weights, weight_per_bin);
                 i = i + 1;
             };
         } else if (strategy_type == STRATEGY_CURVE) {
@@ -295,7 +280,7 @@ module sui_dlmm::position {
             let weight_per_bin = total_weight / (bin_count as u64);
             let mut i = 0u32;
             while (i < bin_count) {
-                vector::push_back(&mut weights, weight_per_bin);
+                std::vector::push_back(&mut weights, weight_per_bin);
                 i = i + 1;
             };
         };
@@ -309,17 +294,17 @@ module sui_dlmm::position {
         upper_bin: u32,
         total_weight: u64
     ): vector<u64> {
-        let mut weights = vector::empty<u64>();
+        let mut weights = std::vector::empty<u64>();
         let center_bin = (lower_bin + upper_bin) / 2;
 
         let mut total_raw_weight = 0u64;
-        let mut raw_weights = vector::empty<u64>();
+        let mut raw_weights = std::vector::empty<u64>();
 
         let mut i = lower_bin;
         while (i <= upper_bin) {
             let distance = if (i >= center_bin) { i - center_bin } else { center_bin - i };
             let raw_weight = 1000u64 / (1 + (distance as u64) * (distance as u64));
-            vector::push_back(&mut raw_weights, raw_weight);
+            std::vector::push_back(&mut raw_weights, raw_weight);
             total_raw_weight = total_raw_weight + raw_weight;
             i = i + 1;
         };
@@ -327,9 +312,9 @@ module sui_dlmm::position {
         let bin_count = upper_bin - lower_bin + 1;
         let mut j = 0;
         while (j < (bin_count as u64)) {
-            let raw_weight = *vector::borrow(&raw_weights, j);
+            let raw_weight = *std::vector::borrow(&raw_weights, j);
             let normalized_weight = (raw_weight * total_weight) / total_raw_weight;
-            vector::push_back(&mut weights, normalized_weight);
+            std::vector::push_back(&mut weights, normalized_weight);
             j = j + 1;
         };
 
@@ -342,7 +327,7 @@ module sui_dlmm::position {
         upper_bin: u32,
         total_weight: u64
     ): vector<u64> {
-        let mut weights = vector::empty<u64>();
+        let mut weights = std::vector::empty<u64>();
         let bin_count = upper_bin - lower_bin + 1;
         
         let edge_weight = total_weight * 40 / 100;
@@ -360,7 +345,7 @@ module sui_dlmm::position {
             } else {
                 middle_weight
             };
-            vector::push_back(&mut weights, weight);
+            std::vector::push_back(&mut weights, weight);
             i = i + 1;
         };
 
@@ -376,9 +361,9 @@ module sui_dlmm::position {
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ) {
-        assert!(tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
+        assert!(sui::tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
         
         let amount_a = coin::value(&coin_a);
         let amount_b = coin::value(&coin_b);
@@ -389,20 +374,20 @@ module sui_dlmm::position {
         
         // Transfer fees to position owner
         if (coin::value(&fee_coin_a) > 0) {
-            transfer::public_transfer(fee_coin_a, position.owner);
+            sui::transfer::public_transfer(fee_coin_a, position.owner);
         } else {
             coin::destroy_zero(fee_coin_a);
         };
         
         if (coin::value(&fee_coin_b) > 0) {
-            transfer::public_transfer(fee_coin_b, position.owner);
+            sui::transfer::public_transfer(fee_coin_b, position.owner);
         } else {
             coin::destroy_zero(fee_coin_b);
         };
 
         // For now, just return the coins to owner (simplified)
-        transfer::public_transfer(coin_a, position.owner);
-        transfer::public_transfer(coin_b, position.owner);
+        sui::transfer::public_transfer(coin_a, position.owner);
+        sui::transfer::public_transfer(coin_b, position.owner);
 
         // Update position totals
         position.total_liquidity_a = position.total_liquidity_a + amount_a;
@@ -410,7 +395,7 @@ module sui_dlmm::position {
 
         // Emit event
         event::emit(LiquidityAddedToPosition {
-            position_id: object::uid_to_inner(&position.id),
+            position_id: sui::object::uid_to_inner(&position.id),
             pool_id: position.pool_id,
             amount_a,
             amount_b,
@@ -425,9 +410,9 @@ module sui_dlmm::position {
         pool: &mut DLMMPool<CoinA, CoinB>,
         percentage: u8,
         clock: &Clock,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): (Coin<CoinA>, Coin<CoinB>) {
-        assert!(tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
+        assert!(sui::tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
         assert!(percentage > 0 && percentage <= 100, EINVALID_AMOUNT);
 
         // Collect fees first
@@ -435,13 +420,13 @@ module sui_dlmm::position {
         
         // Transfer fees to position owner
         if (coin::value(&fee_coin_a) > 0) {
-            transfer::public_transfer(fee_coin_a, position.owner);
+            sui::transfer::public_transfer(fee_coin_a, position.owner);
         } else {
             coin::destroy_zero(fee_coin_a);
         };
         
         if (coin::value(&fee_coin_b) > 0) {
-            transfer::public_transfer(fee_coin_b, position.owner);
+            sui::transfer::public_transfer(fee_coin_b, position.owner);
         } else {
             coin::destroy_zero(fee_coin_b);
         };
@@ -458,7 +443,7 @@ module sui_dlmm::position {
 
         // Emit removal event
         event::emit(LiquidityRemovedFromPosition {
-            position_id: object::uid_to_inner(&position.id),
+            position_id: sui::object::uid_to_inner(&position.id),
             pool_id: position.pool_id,
             percentage,
             amount_a: removed_a,
@@ -475,9 +460,9 @@ module sui_dlmm::position {
         position: &mut Position,
         pool: &mut DLMMPool<CoinA, CoinB>,
         clock: &Clock,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): (Coin<CoinA>, Coin<CoinB>) {
-        assert!(tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
+        assert!(sui::tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
         collect_fees_internal(position, pool, clock, ctx)
     }
 
@@ -488,22 +473,22 @@ module sui_dlmm::position {
         position: &mut Position,
         pool: &mut DLMMPool<CoinA, CoinB>,
         clock: &Clock,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ) {
-        assert!(tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
+        assert!(sui::tx_context::sender(ctx) == position.owner, EUNAUTHORIZED);
 
         // Collect fees first
         let (fee_coin_a, fee_coin_b) = collect_fees_internal(position, pool, clock, ctx);
         
         // Transfer fees to position owner
         if (coin::value(&fee_coin_a) > 0) {
-            transfer::public_transfer(fee_coin_a, position.owner);
+            sui::transfer::public_transfer(fee_coin_a, position.owner);
         } else {
             coin::destroy_zero(fee_coin_a);
         };
         
         if (coin::value(&fee_coin_b) > 0) {
-            transfer::public_transfer(fee_coin_b, position.owner);
+            sui::transfer::public_transfer(fee_coin_b, position.owner);
         } else {
             coin::destroy_zero(fee_coin_b);
         };
@@ -512,7 +497,7 @@ module sui_dlmm::position {
         position.last_rebalance = clock::timestamp_ms(clock);
 
         event::emit(PositionRebalanced {
-            position_id: object::uid_to_inner(&position.id),
+            position_id: sui::object::uid_to_inner(&position.id),
             pool_id: position.pool_id,
             owner: position.owner,
             timestamp: position.last_rebalance,
@@ -522,7 +507,7 @@ module sui_dlmm::position {
     // ==================== View Functions ====================
 
     /// Get position basic information
-    public fun get_position_info(position: &Position): (object::ID, u32, u32, u8, u64, u64, address) {
+    public fun get_position_info(position: &Position): (sui::object::ID, u32, u32, u8, u64, u64, address) {
         (
             position.pool_id,
             position.lower_bin_id,
@@ -549,12 +534,12 @@ module sui_dlmm::position {
 
     /// Get all bin IDs where position has liquidity
     public fun get_position_bin_ids(position: &Position): vector<u32> {
-        let mut bin_ids = vector::empty<u32>();
+        let mut bin_ids = std::vector::empty<u32>();
         let mut current_bin = position.lower_bin_id;
         
         while (current_bin <= position.upper_bin_id) {
             if (table::contains(&position.bin_positions, current_bin)) {
-                vector::push_back(&mut bin_ids, current_bin);
+                std::vector::push_back(&mut bin_ids, current_bin);
             };
             current_bin = current_bin + 1;
         };
@@ -629,7 +614,7 @@ module sui_dlmm::position {
             lower_bin_id,
             upper_bin_id,
             strategy_type,
-            liquidity_distribution: vector::empty(),
+            liquidity_distribution: std::vector::empty(),
         }
     }
 
@@ -641,26 +626,26 @@ module sui_dlmm::position {
         upper_bin_id: u32,
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
-        ctx: &mut tx_context::TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Position {
         let config = PositionConfig {
             lower_bin_id,
             upper_bin_id,
             strategy_type: STRATEGY_UNIFORM,
-            liquidity_distribution: vector::empty(),
+            liquidity_distribution: std::vector::empty(),
         };
 
-        let clock = clock::create_for_testing(ctx);
+        let clock = sui::clock::create_for_testing(ctx);
         let position = create_position(pool, config, coin_a, coin_b, &clock, ctx);
-        clock::destroy_for_testing(clock);
+        sui::clock::destroy_for_testing(clock);
         
         position
     }
 
     #[test_only]
     /// Get position ID for testing
-    public fun get_position_id(position: &Position): object::ID {
-        object::uid_to_inner(&position.id)
+    public fun get_position_id(position: &Position): sui::object::ID {
+        sui::object::uid_to_inner(&position.id)
     }
 
     #[test_only]
@@ -674,33 +659,33 @@ module sui_dlmm::position {
     public fun test_distribution_weights(): bool {
         let lower_bin = 1000u32;
         let upper_bin = 1010u32;
-        let current_price = bin_math::calculate_bin_price(1005, 25);
+        let current_price = sui_dlmm::bin_math::calculate_bin_price(1005, 25);
 
         let uniform_weights = calculate_distribution_weights(
-            lower_bin, upper_bin, current_price, STRATEGY_UNIFORM, vector::empty()
+            lower_bin, upper_bin, current_price, STRATEGY_UNIFORM, std::vector::empty()
         );
         
-        if (vector::length(&uniform_weights) != 11) return false;
+        if (std::vector::length(&uniform_weights) != 11) return false;
         
         let expected_weight = 10000 / 11;
-        let first_weight = *vector::borrow(&uniform_weights, 0);
+        let first_weight = *std::vector::borrow(&uniform_weights, 0);
         if (abs_diff_u64(first_weight, expected_weight) > 10) return false;
 
         let curve_weights = calculate_distribution_weights(
-            lower_bin, upper_bin, current_price, STRATEGY_CURVE, vector::empty()
+            lower_bin, upper_bin, current_price, STRATEGY_CURVE, std::vector::empty()
         );
         
-        let middle_weight = *vector::borrow(&curve_weights, 5);
-        let edge_weight = *vector::borrow(&curve_weights, 0);
+        let middle_weight = *std::vector::borrow(&curve_weights, 5);
+        let edge_weight = *std::vector::borrow(&curve_weights, 0);
         if (middle_weight <= edge_weight) return false;
 
         let bid_ask_weights = calculate_distribution_weights(
-            lower_bin, upper_bin, current_price, STRATEGY_BID_ASK, vector::empty()
+            lower_bin, upper_bin, current_price, STRATEGY_BID_ASK, std::vector::empty()
         );
         
-        let left_edge = *vector::borrow(&bid_ask_weights, 0);
-        let right_edge = *vector::borrow(&bid_ask_weights, 10);
-        let middle = *vector::borrow(&bid_ask_weights, 5);
+        let left_edge = *std::vector::borrow(&bid_ask_weights, 0);
+        let right_edge = *std::vector::borrow(&bid_ask_weights, 10);
+        let middle = *std::vector::borrow(&bid_ask_weights, 5);
         
         if (left_edge <= middle || right_edge <= middle) return false;
 
@@ -729,11 +714,11 @@ module sui_dlmm::position {
     /// Test position utilization calculation
     public fun test_position_utilization(): bool {
         let mut position = Position {
-            id: object::new(&mut tx_context::dummy()),
-            pool_id: object::id_from_address(@0x1),
+            id: sui::object::new(&mut sui::tx_context::dummy()),
+            pool_id: sui::object::id_from_address(@0x1),
             lower_bin_id: 1000,
             upper_bin_id: 1004,
-            bin_positions: table::new(&mut tx_context::dummy()),
+            bin_positions: table::new(&mut sui::tx_context::dummy()),
             strategy_type: STRATEGY_UNIFORM,
             total_liquidity_a: 1000,
             total_liquidity_b: 1000,
@@ -764,7 +749,7 @@ module sui_dlmm::position {
                       strategy_type: _, total_liquidity_a: _, total_liquidity_b: _,
                       unclaimed_fees_a: _, unclaimed_fees_b: _, created_at: _, 
                       last_rebalance: _, owner: _ } = position;
-        object::delete(id);
+        sui::object::delete(id);
         table::destroy_empty(bin_positions);
 
         utilization == 60
