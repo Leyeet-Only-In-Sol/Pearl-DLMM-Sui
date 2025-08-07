@@ -1,5 +1,5 @@
 module sui_dlmm::factory {
-    use sui::object::{Self, UID, ID};
+    use sui::object::{UID, ID};
     use sui::tx_context::{TxContext, sender};
     use sui::table::{Self, Table};
     use sui::coin::Coin;
@@ -7,8 +7,10 @@ module sui_dlmm::factory {
     use sui::event;
     use sui::transfer;
     use std::type_name::{Self, TypeName};
-    use std::string::{Self, String};
+    use std::ascii; // Use ascii for TypeName compatibility
     use std::bcs;
+    use std::vector;
+    use std::option;
     
     use sui_dlmm::dlmm_pool::{Self, DLMMPool};
 
@@ -57,7 +59,7 @@ module sui_dlmm::factory {
 
     // ==================== Pool Creation ====================
 
-    /// Create a new DLMM pool
+    /// Create a new DLMM pool (returns pool, doesn't share it)
     public fun create_pool<CoinA, CoinB>(
         factory: &mut DLMMFactory,
         bin_step: u16,
@@ -108,32 +110,53 @@ module sui_dlmm::factory {
         pool
     }
 
-    /// Generate unique pool key from token types and bin_step
+    /// Generate unique pool key from token types and bin_step (FIXED)
     fun generate_pool_key<CoinA, CoinB>(bin_step: u16): vector<u8> {
         let mut key = vector::empty<u8>();
         
-        // Get type names
+        // Get type names and convert directly to bytes
         let type_a = type_name::get<CoinA>();
         let type_b = type_name::get<CoinB>();
         
-        // Ensure consistent ordering (A < B lexicographically)
-        let type_a_str = type_name::borrow_string(&type_a);
-        let type_b_str = type_name::borrow_string(&type_b);
+        // Convert TypeName to bytes using into_string + as_bytes
+        let type_a_bytes = ascii::as_bytes(type_name::borrow_string(&type_a));
+        let type_b_bytes = ascii::as_bytes(type_name::borrow_string(&type_b));
         
-        let (first_type_str, second_type_str) = if (string::bytes(type_a_str) < string::bytes(type_b_str)) {
-            (type_a_str, type_b_str)
+        // Ensure consistent ordering (A < B lexicographically)
+        let (first_type_bytes, second_type_bytes) = if (compare_bytes(type_a_bytes, type_b_bytes)) {
+            (type_a_bytes, type_b_bytes)
         } else {
-            (type_b_str, type_a_str)
+            (type_b_bytes, type_a_bytes)
         };
         
         // Construct key: type_a + "::" + type_b + "::" + bin_step
-        vector::append(&mut key, *string::bytes(first_type_str));
+        vector::append(&mut key, *first_type_bytes);
         vector::append(&mut key, b"::");
-        vector::append(&mut key, *string::bytes(second_type_str));
+        vector::append(&mut key, *second_type_bytes);
         vector::append(&mut key, b"::");
         vector::append(&mut key, bcs::to_bytes(&bin_step));
         
         key
+    }
+
+    /// Compare two byte vectors lexicographically (a < b)
+    fun compare_bytes(a: &vector<u8>, b: &vector<u8>): bool {
+        let len_a = vector::length(a);
+        let len_b = vector::length(b);
+        let min_len = if (len_a < len_b) len_a else len_b;
+        
+        let mut i = 0;
+        while (i < min_len) {
+            let byte_a = *vector::borrow(a, i);
+            let byte_b = *vector::borrow(b, i);
+            
+            if (byte_a < byte_b) return true;
+            if (byte_a > byte_b) return false;
+            i = i + 1;
+        };
+        
+        // If all bytes are equal, shorter vector comes first
+        len_a < len_b
     }
 
     // ==================== Pool Registry & Discovery ====================
@@ -277,8 +300,8 @@ module sui_dlmm::factory {
 
     // ==================== Utility Functions ====================
 
-    /// Create pool and share it immediately
-    public fun create_and_share_pool<CoinA, CoinB>(
+    /// Create pool and share it immediately (FIXED - made entry function)
+    public entry fun create_and_share_pool<CoinA, CoinB>(
         factory: &mut DLMMFactory,
         bin_step: u16,
         initial_price: u128,
@@ -299,6 +322,7 @@ module sui_dlmm::factory {
             ctx
         );
         
+        // Entry functions can call transfer functions on any objects
         transfer::share_object(pool);
     }
 
