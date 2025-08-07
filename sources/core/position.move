@@ -104,6 +104,35 @@ module sui_dlmm::position {
         timestamp: u64,
     }
 
+    // ==================== Public Constructor Functions ====================
+
+    /// Public constructor for PositionConfig (needed by position_manager)
+    public fun create_position_config(
+        lower_bin_id: u32,
+        upper_bin_id: u32,
+        strategy_type: u8,
+        liquidity_distribution: vector<u64>
+    ): PositionConfig {
+        assert!(lower_bin_id <= upper_bin_id, EINVALID_RANGE);
+        assert!(strategy_type <= 2, EINVALID_STRATEGY);
+        
+        PositionConfig {
+            lower_bin_id,
+            upper_bin_id,
+            strategy_type,
+            liquidity_distribution,
+        }
+    }
+
+    /// Public constructor for simple PositionConfig (most common use case)
+    public fun create_simple_position_config(
+        lower_bin_id: u32,
+        upper_bin_id: u32,
+        strategy_type: u8
+    ): PositionConfig {
+        create_position_config(lower_bin_id, upper_bin_id, strategy_type, std::vector::empty())
+    }
+
     // ==================== Helper Functions ====================
 
     /// Get fee growth for a specific bin
@@ -190,6 +219,64 @@ module sui_dlmm::position {
         (fee_coin_a, fee_coin_b)
     }
 
+    /// NEW: Distribute liquidity across bins according to strategy weights
+    #[allow(unused_variable)] // Suppress warnings for simplified implementation
+    fun distribute_liquidity_across_bins<CoinA, CoinB>(
+        position: &mut Position,
+        _pool: &DLMMPool<CoinA, CoinB>, // Prefixed with _ to indicate intentionally unused
+        total_amount_a: u64,
+        total_amount_b: u64,
+        weights: &vector<u64>,
+        _clock: &Clock, // Prefixed with _ to indicate intentionally unused
+        _ctx: &sui::tx_context::TxContext // Changed to immutable reference and prefixed
+    ) {
+        let total_weight = calculate_total_weight(weights);
+        if (total_weight == 0) return;
+
+        let mut weight_index = 0;
+        let mut current_bin = position.lower_bin_id;
+        
+        while (current_bin <= position.upper_bin_id && weight_index < vector::length(weights)) {
+            let bin_weight = *vector::borrow(weights, weight_index);
+            
+            if (bin_weight > 0) {
+                // Calculate proportional amounts for this bin
+                let amount_a_for_bin = (total_amount_a * bin_weight) / total_weight;
+                let amount_b_for_bin = (total_amount_b * bin_weight) / total_weight;
+                
+                // Create bin position entry
+                if (amount_a_for_bin > 0 || amount_b_for_bin > 0) {
+                    let bin_position = BinPosition {
+                        shares: amount_a_for_bin + amount_b_for_bin, // Simplified share calculation
+                        fee_growth_inside_last_a: 0,
+                        fee_growth_inside_last_b: 0,
+                        liquidity_a: amount_a_for_bin,
+                        liquidity_b: amount_b_for_bin,
+                        weight: bin_weight,
+                    };
+                    
+                    table::add(&mut position.bin_positions, current_bin, bin_position);
+                };
+            };
+            
+            current_bin = current_bin + 1;
+            weight_index = weight_index + 1;
+        };
+    }
+
+    /// Calculate total weight from distribution weights
+    fun calculate_total_weight(weights: &vector<u64>): u64 {
+        let mut total = 0u64;
+        let mut i = 0;
+        
+        while (i < vector::length(weights)) {
+            total = total + *vector::borrow(weights, i);
+            i = i + 1;
+        };
+        
+        total
+    }
+
     // ==================== Position Creation ====================
 
     /// Create new multi-bin liquidity position - FIXED: Proper liquidity handling
@@ -269,64 +356,6 @@ module sui_dlmm::position {
         });
 
         position
-    }
-
-    /// NEW: Distribute liquidity across bins according to strategy weights
-    #[allow(unused_variable)] // Suppress warnings for simplified implementation
-    fun distribute_liquidity_across_bins<CoinA, CoinB>(
-        position: &mut Position,
-        _pool: &DLMMPool<CoinA, CoinB>, // Prefixed with _ to indicate intentionally unused
-        total_amount_a: u64,
-        total_amount_b: u64,
-        weights: &vector<u64>,
-        _clock: &Clock, // Prefixed with _ to indicate intentionally unused
-        _ctx: &sui::tx_context::TxContext // Changed to immutable reference and prefixed
-    ) {
-        let total_weight = calculate_total_weight(weights);
-        if (total_weight == 0) return;
-
-        let mut weight_index = 0;
-        let mut current_bin = position.lower_bin_id;
-        
-        while (current_bin <= position.upper_bin_id && weight_index < vector::length(weights)) {
-            let bin_weight = *vector::borrow(weights, weight_index);
-            
-            if (bin_weight > 0) {
-                // Calculate proportional amounts for this bin
-                let amount_a_for_bin = (total_amount_a * bin_weight) / total_weight;
-                let amount_b_for_bin = (total_amount_b * bin_weight) / total_weight;
-                
-                // Create bin position entry
-                if (amount_a_for_bin > 0 || amount_b_for_bin > 0) {
-                    let bin_position = BinPosition {
-                        shares: amount_a_for_bin + amount_b_for_bin, // Simplified share calculation
-                        fee_growth_inside_last_a: 0,
-                        fee_growth_inside_last_b: 0,
-                        liquidity_a: amount_a_for_bin,
-                        liquidity_b: amount_b_for_bin,
-                        weight: bin_weight,
-                    };
-                    
-                    table::add(&mut position.bin_positions, current_bin, bin_position);
-                };
-            };
-            
-            current_bin = current_bin + 1;
-            weight_index = weight_index + 1;
-        };
-    }
-
-    /// Calculate total weight from distribution weights
-    fun calculate_total_weight(weights: &vector<u64>): u64 {
-        let mut total = 0u64;
-        let mut i = 0;
-        
-        while (i < vector::length(weights)) {
-            total = total + *vector::borrow(weights, i);
-            i = i + 1;
-        };
-        
-        total
     }
 
     /// Calculate distribution weights based on strategy
@@ -595,6 +624,43 @@ module sui_dlmm::position {
         });
     }
 
+    // ==================== Public Access Functions (NEW) ====================
+
+    /// Get position ID (promoted from test_only)
+    public fun get_position_id(position: &Position): sui::object::ID {
+        sui::object::uid_to_inner(&position.id)
+    }
+
+    /// Get position owner (promoted from test_only)
+    public fun get_position_owner(position: &Position): address {
+        position.owner
+    }
+
+    /// Get position pool ID
+    public fun get_position_pool_id(position: &Position): sui::object::ID {
+        position.pool_id
+    }
+
+    /// Get position range
+    public fun get_position_range(position: &Position): (u32, u32) {
+        (position.lower_bin_id, position.upper_bin_id)
+    }
+
+    /// Get position strategy type
+    public fun get_position_strategy(position: &Position): u8 {
+        position.strategy_type
+    }
+
+    /// Get position creation timestamp
+    public fun get_position_created_at(position: &Position): u64 {
+        position.created_at
+    }
+
+    /// Get position last rebalance timestamp
+    public fun get_position_last_rebalance(position: &Position): u64 {
+        position.last_rebalance
+    }
+
     // ==================== View Functions ====================
 
     /// Get position basic information
@@ -731,18 +797,6 @@ module sui_dlmm::position {
         sui::clock::destroy_for_testing(clock);
         
         position
-    }
-
-    #[test_only]
-    /// Get position ID for testing
-    public fun get_position_id(position: &Position): sui::object::ID {
-        sui::object::uid_to_inner(&position.id)
-    }
-
-    #[test_only]
-    /// Get position owner for testing
-    public fun get_position_owner(position: &Position): address {
-        position.owner
     }
 
     #[test_only]
