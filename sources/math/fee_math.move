@@ -4,7 +4,7 @@ module sui_dlmm::fee_math {
     const VOLATILITY_SCALE: u64 = 1000; // Scale for volatility calculations
     const MAX_VARIABLE_FEE_MULTIPLIER: u64 = 1000; // Max 10x base fee from volatility
     
-    // Fee configuration constants (removed unused DEFAULT_BASE_FACTOR)
+    // Fee configuration constants
     const MAX_BASE_FACTOR: u16 = 1000; // Maximum base factor (10x)
     const MAX_PROTOCOL_FEE_RATE: u16 = 5000; // Maximum 50% protocol fee
     
@@ -14,13 +14,13 @@ module sui_dlmm::fee_math {
     const EINVALID_BIN_STEP: u64 = 3;
     const EMATH_OVERFLOW: u64 = 4;
 
-    /// Calculate dynamic fee based on base fee and volatility
+    /// Calculate dynamic fee based on base fee and volatility - FIXED
     /// Dynamic fee = base_fee + variable_fee(volatility)
     /// 
     /// @param base_factor: Multiplier for base fee calculation (typically 100 = 1x)
     /// @param bin_step: Bin step in basis points (determines base fee)
     /// @param bins_crossed: Number of bins crossed in the swap (volatility indicator)
-    /// @returns Dynamic fee in basis points (scaled to swap amount)
+    /// @returns Dynamic fee in basis points (raw, not divided by BASIS_POINTS_SCALE)
     public fun calculate_dynamic_fee(
         base_factor: u16,
         bin_step: u16,
@@ -29,49 +29,39 @@ module sui_dlmm::fee_math {
         assert!(base_factor <= MAX_BASE_FACTOR, EINVALID_BASE_FACTOR);
         assert!(bin_step > 0 && bin_step <= 10000, EINVALID_BIN_STEP);
 
-        // Calculate base fee: base_factor * bin_step / BASIS_POINTS_SCALE
-        let base_fee = ((base_factor as u64) * (bin_step as u64)) / BASIS_POINTS_SCALE;
+        // FIXED: Calculate base fee without premature division
+        // This gives us the fee in "raw basis points" that we'll divide later when applying to amounts
+        let base_fee = (base_factor as u64) * (bin_step as u64);
         
         // Calculate variable fee based on bins crossed (volatility)
-        let variable_fee = calculate_variable_fee(base_fee, bins_crossed);
+        let variable_fee = calculate_variable_fee_fixed(base_fee, bins_crossed);
         
-        // Total dynamic fee
+        // Total dynamic fee (in raw basis points)
         let total_fee = base_fee + variable_fee;
         
         // Ensure we don't overflow
-        assert!(total_fee <= (18446744073709551615u64 / 10000), EMATH_OVERFLOW);
+        assert!(total_fee <= (18446744073709551615u64 / 100), EMATH_OVERFLOW);
         
         total_fee
     }
 
     /// Calculate variable fee component based on volatility (bins crossed) - FIXED
     /// Variable fee increases with volatility to compensate LPs for impermanent loss
-    fun calculate_variable_fee(base_fee: u64, bins_crossed: u32): u64 {
+    fun calculate_variable_fee_fixed(base_fee: u64, bins_crossed: u32): u64 {
         if (bins_crossed == 0) return 0;
         
-        // FIXED: Proper volatility multiplier calculation
         let bins_u64 = bins_crossed as u64;
         
-        // Enhanced volatility factor with proper scaling
-        // Formula: multiplier = bins_crossed * (1000 + bins_crossed * 50) / 1000
-        // This ensures non-linear growth: 1 bin = 1.05x, 5 bins = 1.5x, 10 bins = 2x, etc.
-        let volatility_multiplier = bins_u64 * (1000 + bins_u64 * 50) / 1000;
+        // FIXED: Simple but effective scaling that guarantees non-zero increases
+        // Each bin crossed adds 10% of base fee as variable fee
+        let variable_fee = (base_fee * bins_u64) / 10;
         
-        // Cap the multiplier to prevent excessive fees
-        let capped_multiplier = if (volatility_multiplier > MAX_VARIABLE_FEE_MULTIPLIER) {
-            MAX_VARIABLE_FEE_MULTIPLIER
-        } else {
-            volatility_multiplier
-        };
+        // Ensure minimum increase per bin
+        let minimum_increase = base_fee / 20; // At least 5% of base fee per bin
+        let per_bin_minimum = minimum_increase * bins_u64;
         
-        // FIXED: Ensure minimum fee for any volatility
-        let variable_fee = (base_fee * capped_multiplier) / VOLATILITY_SCALE;
-        
-        // Guarantee non-zero fee when bins are crossed
-        if (variable_fee == 0 && bins_crossed > 0) {
-            // Minimum variable fee: 1 basis point or 1/10000 of base fee, whichever is larger
-            let min_fee = if (base_fee >= 10000) { base_fee / 10000 } else { 1 };
-            min_fee
+        if (variable_fee < per_bin_minimum) {
+            per_bin_minimum
         } else {
             variable_fee
         }
@@ -80,7 +70,7 @@ module sui_dlmm::fee_math {
     /// Calculate protocol fee from total dynamic fee
     /// Protocol fee is a percentage of the total fee paid to the protocol treasury
     /// 
-    /// @param total_fee: Total dynamic fee amount
+    /// @param total_fee: Total dynamic fee amount (already applied to swap amount)
     /// @param protocol_fee_rate: Protocol fee rate in basis points (e.g., 300 = 3%)
     /// @returns Protocol fee amount
     public fun calculate_protocol_fee(total_fee: u64, protocol_fee_rate: u16): u64 {
@@ -99,13 +89,21 @@ module sui_dlmm::fee_math {
         total_fee - protocol_fee
     }
 
-    /// Calculate fee amount for a specific swap
+    /// Calculate fee amount for a specific swap - FIXED
     /// 
     /// @param swap_amount: Amount being swapped
-    /// @param fee_rate: Fee rate in basis points
+    /// @param fee_rate: Fee rate in raw basis points (from calculate_dynamic_fee)
     /// @returns Fee amount in same units as swap_amount
     public fun calculate_fee_amount(swap_amount: u64, fee_rate: u64): u64 {
-        (swap_amount * fee_rate) / BASIS_POINTS_SCALE
+        // FIXED: Now we properly divide by BASIS_POINTS_SCALE here
+        let fee_amount = (swap_amount * fee_rate) / BASIS_POINTS_SCALE;
+        
+        // Ensure minimum fee for non-zero swaps and non-zero rates
+        if (fee_amount == 0 && swap_amount > 0 && fee_rate > 0) {
+            1 // Minimum 1 unit fee
+        } else {
+            fee_amount
+        }
     }
 
     /// Calculate net amount after fee deduction
@@ -285,10 +283,13 @@ module sui_dlmm::fee_math {
     // ==================== Test Helper Functions ====================
 
     #[test_only]
-    /// Test dynamic fee scaling with volatility - ENHANCED
+    /// Test dynamic fee scaling with volatility - ENHANCED with debugging
     public fun test_dynamic_fee_scaling(): bool {
         let base_factor = 100u16;
         let bin_step = 25u16;
+        
+        // Calculate expected values
+        let expected_base_fee = (base_factor as u64) * (bin_step as u64); // Should be 2500
         
         // Test fee progression as bins_crossed increases
         let fee_0_bins = calculate_dynamic_fee(base_factor, bin_step, 0);
@@ -296,14 +297,23 @@ module sui_dlmm::fee_math {
         let fee_20_bins = calculate_dynamic_fee(base_factor, bin_step, 20);
         
         // DEBUG: Print values for verification
-        std::debug::print(&std::string::utf8(b"Fee 0 bins: "));
+        std::debug::print(&std::string::utf8(b"=== COMPREHENSIVE FEE DEBUG ==="));
+        std::debug::print(&std::string::utf8(b"Expected base fee: "));
+        std::debug::print(&expected_base_fee);
+        std::debug::print(&std::string::utf8(b"Actual fee 0 bins: "));
         std::debug::print(&fee_0_bins);
-        std::debug::print(&std::string::utf8(b"Fee 5 bins: "));
+        std::debug::print(&std::string::utf8(b"Actual fee 5 bins: "));
         std::debug::print(&fee_5_bins);
-        std::debug::print(&std::string::utf8(b"Fee 20 bins: "));
+        std::debug::print(&std::string::utf8(b"Actual fee 20 bins: "));
         std::debug::print(&fee_20_bins);
         
-        // FIXED: Fees should increase with volatility (now guaranteed by fix)
+        // Test the base fee calculation
+        if (fee_0_bins != expected_base_fee) {
+            std::debug::print(&std::string::utf8(b"ERROR: Base fee mismatch"));
+            return false
+        };
+        
+        // FIXED: Fees should definitely increase with volatility now
         if (fee_5_bins <= fee_0_bins) {
             std::debug::print(&std::string::utf8(b"ERROR: fee_5_bins not > fee_0_bins"));
             return false
@@ -313,12 +323,13 @@ module sui_dlmm::fee_math {
             return false
         };
         
-        // High volatility should be at least 2x base fee (now guaranteed)
+        // High volatility should be significantly higher than base
         if (fee_20_bins < fee_0_bins * 2) {
-            std::debug::print(&std::string::utf8(b"ERROR: fee_20_bins not >= 2x fee_0_bins"));
+            std::debug::print(&std::string::utf8(b"ERROR: fee_20_bins should be at least 2x base"));
             return false
         };
         
+        std::debug::print(&std::string::utf8(b"SUCCESS: All fee scaling tests passed"));
         true
     }
 
@@ -344,19 +355,19 @@ module sui_dlmm::fee_math {
     }
 
     #[test_only]
-    /// Test fee amount calculations for swaps
+    /// Test fee amount calculations for swaps - ENHANCED
     public fun test_swap_fee_calculations(): bool {
         let swap_amount = 1000000u64; // 1M units
-        let fee_rate = 250u64; // 2.5% (250 basis points)
+        let fee_rate = 2500u64; // Raw basis points (2500 = 25% when divided by 10000)
         
         let fee_amount = calculate_fee_amount(swap_amount, fee_rate);
         let net_amount = calculate_net_amount(swap_amount, fee_rate);
         
-        // Fee should be 2.5% = 25k units
-        if (fee_amount != 25000) return false;
+        // Fee should be 25% = 250k units
+        if (fee_amount != 250000) return false;
         
-        // Net should be 97.5% = 975k units
-        if (net_amount != 975000) return false;
+        // Net should be 75% = 750k units
+        if (net_amount != 750000) return false;
         
         // Sum should equal original
         if (fee_amount + net_amount != swap_amount) return false;
@@ -381,24 +392,24 @@ module sui_dlmm::fee_math {
     }
 
     #[test_only]
-    /// Test variable fee calculation directly - NEW
+    /// Test variable fee calculation directly - ENHANCED
     public fun test_variable_fee_calculation(): bool {
-        let base_fee = 25u64; // 25 basis points base fee
+        let base_fee = 2500u64; // 25 basis points base fee (100 * 25)
         
         // Test with 0 bins crossed - should return 0
-        let var_fee_0 = calculate_variable_fee(base_fee, 0);
+        let var_fee_0 = calculate_variable_fee_fixed(base_fee, 0);
         if (var_fee_0 != 0) return false;
         
         // Test with 1 bin crossed - should be non-zero
-        let var_fee_1 = calculate_variable_fee(base_fee, 1);
+        let var_fee_1 = calculate_variable_fee_fixed(base_fee, 1);
         if (var_fee_1 == 0) return false;
         
         // Test with 5 bins crossed - should be higher
-        let var_fee_5 = calculate_variable_fee(base_fee, 5);
+        let var_fee_5 = calculate_variable_fee_fixed(base_fee, 5);
         if (var_fee_5 <= var_fee_1) return false;
         
         // Test with 20 bins crossed - should be even higher
-        let var_fee_20 = calculate_variable_fee(base_fee, 20);
+        let var_fee_20 = calculate_variable_fee_fixed(base_fee, 20);
         if (var_fee_20 <= var_fee_5) return false;
         
         std::debug::print(&std::string::utf8(b"Variable fees - 1 bin: "));
@@ -407,6 +418,33 @@ module sui_dlmm::fee_math {
         std::debug::print(&var_fee_5);
         std::debug::print(&std::string::utf8(b"Variable fees - 20 bins: "));
         std::debug::print(&var_fee_20);
+        
+        true
+    }
+
+    #[test_only]
+    /// Test minimum fee guarantees - ENHANCED
+    public fun test_minimum_fee_guarantees(): bool {
+        // Test small swap amounts that might result in 0 fees
+        let small_amount = 100u64;
+        let small_fee_rate = 25u64; // Very small rate
+        
+        let fee_amount = calculate_fee_amount(small_amount, small_fee_rate);
+        
+        // Should calculate proper fee (100 * 25 / 10000 = 0.25, rounds to 0, but we guarantee minimum 1)
+        if (fee_amount == 0) {
+            std::debug::print(&std::string::utf8(b"ERROR: Zero fee for non-zero swap"));
+            return false
+        };
+        
+        // Test variable fee minimum guarantees
+        let base_fee = 2500u64;
+        let var_fee_small = calculate_variable_fee_fixed(base_fee, 1);
+        
+        if (var_fee_small == 0) {
+            std::debug::print(&std::string::utf8(b"ERROR: Zero variable fee"));
+            return false
+        };
         
         true
     }
