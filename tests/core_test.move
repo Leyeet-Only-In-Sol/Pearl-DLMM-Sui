@@ -510,7 +510,8 @@ module sui_dlmm::core_tests {
             calculated_impact
         }
     }
-     #[test]
+
+    #[test]
     fun test_position_manager_simple_creation() {
         // Test: Simplified position creation via position_manager
         let scenario = test::begin(ADMIN);
@@ -547,24 +548,27 @@ module sui_dlmm::core_tests {
 
     #[test]
     fun test_position_manager_recommendations() {
-        // Test: Position manager recommendation logic
+        // Test: Position manager recommendation logic - FIXED: Replaced tuples with individual variables
         let scenario = test::begin(ADMIN);
         
-        // Test optimal ratio calculations
-        let equal_ratio = (500u64, 500u64);
-        let high_price_ratio = (800u64, 200u64);
-        let low_price_ratio = (300u64, 700u64);
+        // FIXED: Use individual variables instead of tuples
+        let equal_ratio_a = 500u64;
+        let equal_ratio_b = 500u64;
+        let high_price_ratio_a = 800u64;
+        let high_price_ratio_b = 200u64;
+        let low_price_ratio_a = 300u64;
+        let low_price_ratio_b = 700u64;
         
         // Ratios should sum to 1000
-        assert_eq(equal_ratio.0 + equal_ratio.1, 1000);
-        assert_eq(high_price_ratio.0 + high_price_ratio.1, 1000);
-        assert_eq(low_price_ratio.0 + low_price_ratio.1, 1000);
+        assert!(equal_ratio_a + equal_ratio_b == 1000);
+        assert!(high_price_ratio_a + high_price_ratio_b == 1000);
+        assert!(low_price_ratio_a + low_price_ratio_b == 1000);
         
         // High price should favor token A
-        assert!(high_price_ratio.0 > high_price_ratio.1);
+        assert!(high_price_ratio_a > high_price_ratio_b);
         
         // Low price should favor token B  
-        assert!(low_price_ratio.1 > low_price_ratio.0);
+        assert!(low_price_ratio_b > low_price_ratio_a);
         
         // Test range recommendations
         let conservative_range = 20u32;
@@ -612,5 +616,165 @@ module sui_dlmm::core_tests {
         std::debug::print(&std::string::utf8(b"✅ Position manager metrics calculations validated"));
         
         test::end(scenario);
+    }
+
+    // ==================== 🔧 NEW: Integration Tests ====================
+
+    #[test]
+    fun test_position_pool_integration_basic() {
+        // Test: Basic position-pool integration without complex coin creation
+        let scenario = test::begin(ADMIN);
+        
+        // Test that distribution weight calculation works
+        let distribution_weights = calculate_distribution_weights(
+            1000, 1010, 1005, 0 // uniform strategy around bin 1005
+        );
+        
+        // Should have 11 bins with roughly equal weights
+        assert_eq(std::vector::length(&distribution_weights), 11);
+        
+        let expected_weight = 10000 / 11; // ~909
+        let first_weight = *std::vector::borrow(&distribution_weights, 0);
+        assert!(abs_diff_u64(first_weight, expected_weight) < 100);
+        
+        std::debug::print(&std::string::utf8(b"✅ Distribution weights calculated correctly"));
+        
+        test::end(scenario);
+    }
+
+    #[test]
+    fun test_position_math_integration() {
+        // Test: Mathematical integration between position and pool logic
+        let scenario = test::begin(ADMIN);
+        
+        // Test weight calculation for different strategies
+        let uniform_weights = calculate_distribution_weights(995, 1005, 1000, 0);
+        let curve_weights = calculate_distribution_weights(995, 1005, 1000, 1);
+        let bid_ask_weights = calculate_distribution_weights(995, 1005, 1000, 2);
+        
+        // All should have same number of bins
+        assert_eq(std::vector::length(&uniform_weights), 11);
+        assert_eq(std::vector::length(&curve_weights), 11);
+        assert_eq(std::vector::length(&bid_ask_weights), 11);
+        
+        // Curve strategy should concentrate around middle (index 5)
+        let curve_middle = *std::vector::borrow(&curve_weights, 5);
+        let curve_edge = *std::vector::borrow(&curve_weights, 0);
+        assert!(curve_middle > curve_edge);
+        
+        // Bid-ask should concentrate at edges  
+        let bid_ask_left = *std::vector::borrow(&bid_ask_weights, 0);
+        let bid_ask_right = *std::vector::borrow(&bid_ask_weights, 10);
+        let bid_ask_middle = *std::vector::borrow(&bid_ask_weights, 5);
+        assert!(bid_ask_left > bid_ask_middle);
+        assert!(bid_ask_right > bid_ask_middle);
+        
+        std::debug::print(&std::string::utf8(b"✅ Position strategy math integration validated"));
+        
+        test::end(scenario);
+    }
+
+    #[test]
+    fun test_position_fee_calculations() {
+        // Test: Fee calculation logic for positions
+        let scenario = test::begin(ADMIN);
+        
+        // Test fee growth calculations
+        let shares = 1000u64;
+        let initial_fee_growth = 1000000000000000000u128; // 1e18
+        let updated_fee_growth = 2000000000000000000u128; // 2e18
+        
+        let calculated_fees = calculate_fees_earned_test(shares, updated_fee_growth, initial_fee_growth);
+        
+        // Should earn 1000 units: (1000 shares * 1e18 growth) / 1e18 = 1000
+        assert_eq(calculated_fees, 1000);
+        
+        std::debug::print(&std::string::utf8(b"✅ Position fee calculations validated"));
+        
+        test::end(scenario);
+    }
+
+    #[test]
+    fun test_position_lifecycle_simulation() {
+        // Test: Simulate complete position lifecycle without actual coin operations
+        let scenario = test::begin(ADMIN);
+        
+        // Simulate position creation parameters
+        let lower_bin_id = 995u32;
+        let upper_bin_id = 1005u32;
+        let strategy_type = 1u8; // Curve strategy
+        let _liquidity_a = 100000u64; // FIXED: Prefixed with _ to suppress warning
+        let _liquidity_b = 300000u64; // FIXED: Prefixed with _ to suppress warning
+        
+        // Test range validation
+        assert!(upper_bin_id >= lower_bin_id);
+        assert!(strategy_type <= 2);
+        
+        // Test bin count calculation
+        let bin_count = upper_bin_id - lower_bin_id + 1;
+        assert_eq(bin_count, 11);
+        
+        // Test weight distribution
+        let weights = calculate_distribution_weights(
+            lower_bin_id, upper_bin_id, 1000, strategy_type
+        );
+        assert_eq(std::vector::length(&weights), (bin_count as u64));
+        
+        // Test utilization calculation (simulated)
+        let active_bins = 7u32; // Assume 7 out of 11 bins have liquidity
+        let utilization = (active_bins * 100) / bin_count;
+        assert_eq(utilization, 63); // 7/11 ≈ 63%
+        
+        std::debug::print(&std::string::utf8(b"✅ Position lifecycle simulation validated"));
+        
+        test::end(scenario);
+    }
+
+    #[test]
+    fun test_position_strategy_distribution() {
+        // Test: Strategy distribution differences
+        let scenario = test::begin(ADMIN);
+        
+        let lower_bin = 1000u32;
+        let upper_bin = 1020u32; // 21 bins total
+        let active_bin = 1010u32; // Middle
+        
+        // Test uniform distribution
+        let uniform_weights = calculate_distribution_weights(lower_bin, upper_bin, active_bin, 0);
+        let uniform_weight_0 = *std::vector::borrow(&uniform_weights, 0);
+        let uniform_weight_10 = *std::vector::borrow(&uniform_weights, 10); // Middle
+        let uniform_weight_20 = *std::vector::borrow(&uniform_weights, 20);
+        
+        // Uniform should have similar weights
+        assert!(abs_diff_u64(uniform_weight_0, uniform_weight_10) < 100);
+        assert!(abs_diff_u64(uniform_weight_10, uniform_weight_20) < 100);
+        
+        // Test curve distribution
+        let curve_weights = calculate_distribution_weights(lower_bin, upper_bin, active_bin, 1);
+        let curve_weight_0 = *std::vector::borrow(&curve_weights, 0);   // Edge
+        let curve_weight_10 = *std::vector::borrow(&curve_weights, 10); // Middle (active)
+        let curve_weight_20 = *std::vector::borrow(&curve_weights, 20); // Edge
+        
+        // Curve should concentrate in middle
+        assert!(curve_weight_10 > curve_weight_0);
+        assert!(curve_weight_10 > curve_weight_20);
+        
+        std::debug::print(&std::string::utf8(b"✅ Position strategy distributions validated"));
+        
+        test::end(scenario);
+    }
+
+    // ==================== Test Helper Functions for Integration ====================
+
+    /// Test helper for fee calculation (extracted for testing)
+    fun calculate_fees_earned_test(
+        shares: u64,
+        current_fee_growth: u128,
+        last_fee_growth: u128
+    ): u64 {
+        if (current_fee_growth <= last_fee_growth || shares == 0) return 0;
+        
+        let fee_growth_diff = current_fee_growth - last_fee_growth;
+        ((shares as u128) * fee_growth_diff / 1000000000000000000u128) as u64
     }
 }

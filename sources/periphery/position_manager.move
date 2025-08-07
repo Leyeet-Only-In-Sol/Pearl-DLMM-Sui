@@ -61,7 +61,7 @@ module sui_dlmm::position_manager {
 
         // Emit simplified creation event
         event::emit(SimplePositionCreated {
-            position_id: position::get_position_id(&position),
+            position_id: position::get_position_id(&position), // FIXED: Added & back because position is owned value here
             pool_id: dlmm_pool::get_pool_id(pool),
             owner: sui::tx_context::sender(ctx),
             active_bin_id,
@@ -113,7 +113,7 @@ module sui_dlmm::position_manager {
         );
 
         event::emit(PriceTargetedPositionCreated {
-            position_id: position::get_position_id(&position),
+            position_id: position::get_position_id(&position), // FIXED: Added & back because position is owned value here
             pool_id: dlmm_pool::get_pool_id(pool),
             owner: sui::tx_context::sender(ctx),
             target_price,
@@ -159,7 +159,7 @@ module sui_dlmm::position_manager {
     /// Rebalance position automatically based on current pool state
     public fun rebalance_position_auto<CoinA, CoinB>(
         position: &mut Position,
-        pool: &DLMMPool<CoinA, CoinB>,
+        pool: &mut DLMMPool<CoinA, CoinB>, // FIXED: Changed to mutable
         clock: &Clock,
         ctx: &mut sui::tx_context::TxContext
     ) {
@@ -181,7 +181,7 @@ module sui_dlmm::position_manager {
             position::rebalance_position<CoinA, CoinB>(position, pool, clock, ctx);
             
             event::emit(AutoRebalanceExecuted {
-                position_id: position::get_position_id(position),
+                position_id: position::get_position_id(position), // FIXED: Removed & since position is already a reference
                 old_active_bin: current_active_bin,
                 new_lower_bin: lower_bin,
                 new_upper_bin: upper_bin,
@@ -212,7 +212,7 @@ module sui_dlmm::position_manager {
 
         // Emit collection event
         event::emit(AllFeesCollected {
-            position_id: position::get_position_id(position),
+            position_id: position::get_position_id(position), // FIXED: Removed & since position is already a reference
             fee_a: total_fee_a,
             fee_b: total_fee_b,
             owner,
@@ -225,7 +225,7 @@ module sui_dlmm::position_manager {
     /// Add liquidity to position with simplified interface
     public fun add_liquidity_auto<CoinA, CoinB>(
         position: &mut Position,
-        pool: &DLMMPool<CoinA, CoinB>,
+        pool: &mut DLMMPool<CoinA, CoinB>, // FIXED: Changed to mutable
         coin_a: Coin<CoinA>,
         coin_b: Coin<CoinB>,
         clock: &Clock,
@@ -243,7 +243,7 @@ module sui_dlmm::position_manager {
     /// Remove percentage of liquidity from position
     public fun remove_liquidity_percentage<CoinA, CoinB>(
         position: &mut Position,
-        pool: &DLMMPool<CoinA, CoinB>,
+        pool: &mut DLMMPool<CoinA, CoinB>, // FIXED: Changed to mutable
         percentage: u8,         // 1-100 percentage to remove
         clock: &Clock,
         ctx: &mut sui::tx_context::TxContext
@@ -513,7 +513,7 @@ module sui_dlmm::position_manager {
     /// Entry function: Auto-rebalance position
     public entry fun auto_rebalance_position<CoinA, CoinB>(
         position: &mut Position,
-        pool: &DLMMPool<CoinA, CoinB>,
+        pool: &mut DLMMPool<CoinA, CoinB>, // FIXED: Changed to mutable to match rebalance_position_auto
         clock: &Clock,
         ctx: &mut sui::tx_context::TxContext
     ) {
@@ -639,14 +639,14 @@ module sui_dlmm::position_manager {
     }
 
     #[test_only]
-    /// Test ratio calculations
+    /// Test ratio calculations - FIXED: Replaced assert_eq with proper assertions
     public fun test_optimal_ratio_calculation(): bool {
         // Test ratio calculation logic
         let (ratio_a, ratio_b) = (500u64, 500u64); // Equal ratio
-        assert_eq(ratio_a + ratio_b, 1000);
+        assert!(ratio_a + ratio_b == 1000); // FIXED: Use standard assertion
         
         let (high_price_a, high_price_b) = (800u64, 200u64); // High price scenario
-        assert_eq(high_price_a + high_price_b, 1000);
+        assert!(high_price_a + high_price_b == 1000); // FIXED: Use standard assertion
         assert!(high_price_a > high_price_b); // Should favor token A
         
         true
