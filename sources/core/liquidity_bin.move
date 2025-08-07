@@ -610,6 +610,7 @@ module sui_dlmm::liquidity_bin {
             fee_growth_inside_last_b: 0,
             liquidity_a: 0,
             liquidity_b: 0,
+            weight: 1000,            // <- ADD THIS LINE: Default weight for testing
             last_update_time: 0,
         }
     }

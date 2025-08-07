@@ -188,7 +188,7 @@ module sui_dlmm::constant_sum {
         (diff as u128) <= max_allowed_diff
     }
 
-    /// Calculate maximum swap amount that can be executed within a bin
+    /// Calculate maximum swap amount that can be executed within a bin - FIXED
     /// @param liquidity_x: Current X token reserves
     /// @param liquidity_y: Current Y token reserves
     /// @param zero_for_one: Direction of swap (X->Y or Y->X)
@@ -204,12 +204,34 @@ module sui_dlmm::constant_sum {
 
         if (zero_for_one) {
             // Swapping X for Y - limited by available Y
+            if (liquidity_y == 0) return 0; // FIXED: Handle zero liquidity case
+            
             // max_x_in = liquidity_y * PRICE_SCALE / price
-            ((liquidity_y as u128) * PRICE_SCALE / price) as u64
+            let max_amount = ((liquidity_y as u128) * PRICE_SCALE) / price;
+            
+            // FIXED: Ensure we don't overflow u64 and handle edge cases
+            if (max_amount > (18446744073709551615u64 as u128)) {
+                18446744073709551615u64 // u64::MAX - prevent overflow
+            } else if (max_amount == 0 && liquidity_y > 0) {
+                1 // Minimum 1 unit if there's any liquidity Y available
+            } else {
+                max_amount as u64
+            }
         } else {
-            // Swapping Y for X - limited by available X
+            // Swapping Y for X - limited by available X  
+            if (liquidity_x == 0) return 0; // FIXED: Handle zero liquidity case
+            
             // max_y_in = liquidity_x * price / PRICE_SCALE
-            ((liquidity_x as u128) * price / PRICE_SCALE) as u64
+            let max_amount = ((liquidity_x as u128) * price) / PRICE_SCALE;
+            
+            // FIXED: Ensure we don't overflow u64 and handle edge cases
+            if (max_amount > (18446744073709551615u64 as u128)) {
+                18446744073709551615u64 // u64::MAX - prevent overflow
+            } else if (max_amount == 0 && liquidity_x > 0) {
+                1 // Minimum 1 unit if there's any liquidity X available
+            } else {
+                max_amount as u64
+            }
         }
     }
 
@@ -358,6 +380,82 @@ module sui_dlmm::constant_sum {
         
         if (rate_diff_reverse > price / 1000) return false;
 
+        true
+    }
+
+    #[test_only]
+    /// Test max swap amount calculation - ENHANCED
+    public fun test_max_swap_amount_calculation(): bool {
+        let price = 3400 * PRICE_SCALE; // $3400 per X token
+        
+        // Test case 1: Normal liquidity amounts
+        let liquidity_x = 1000u64;
+        let liquidity_y = 3400000u64; // 1000 * 3400
+        
+        let max_x_to_y = calculate_max_swap_amount(liquidity_x, liquidity_y, true, price);
+        let max_y_to_x = calculate_max_swap_amount(liquidity_x, liquidity_y, false, price);
+        
+        // DEBUG: Print calculated values
+        std::debug::print(&std::string::utf8(b"Max X->Y swap: "));
+        std::debug::print(&max_x_to_y);
+        std::debug::print(&std::string::utf8(b"Max Y->X swap: "));
+        std::debug::print(&max_y_to_x);
+        
+        // Both should be positive
+        if (max_x_to_y == 0) {
+            std::debug::print(&std::string::utf8(b"ERROR: max_x_to_y is 0"));
+            return false
+        };
+        if (max_y_to_x == 0) {
+            std::debug::print(&std::string::utf8(b"ERROR: max_y_to_x is 0"));
+            return false
+        };
+        
+        // Test case 2: Zero liquidity edge cases
+        let max_zero_x = calculate_max_swap_amount(0, liquidity_y, false, price);
+        let max_zero_y = calculate_max_swap_amount(liquidity_x, 0, true, price);
+        
+        // Should return 0 when relevant liquidity is 0
+        if (max_zero_x != 0) return false;
+        if (max_zero_y != 0) return false;
+        
+        // Test case 3: Very high price edge case
+        let high_price = 1000000 * PRICE_SCALE; // Very high price
+        let max_high_price = calculate_max_swap_amount(1000, 1000, true, high_price);
+        
+        // Should handle high prices without overflow
+        if (max_high_price > liquidity_y) return false; // Can't exceed available liquidity
+        
+        true
+    }
+
+    #[test_only]
+    /// Test mathematical consistency - NEW
+    public fun test_mathematical_consistency(): bool {
+        let price = 2500 * PRICE_SCALE;
+        let liquidity = 1000000u64;
+        
+        // Test round-trip: liquidity -> amounts -> liquidity
+        let (amount_x, amount_y) = calculate_amounts_from_liquidity(liquidity, price, 50);
+        let recovered_liquidity = calculate_liquidity_from_amounts(amount_x, amount_y, price);
+        
+        // Should be approximately equal (within 1%)
+        let diff = if (recovered_liquidity >= liquidity) {
+            recovered_liquidity - liquidity
+        } else {
+            liquidity - recovered_liquidity
+        };
+        
+        if (diff > liquidity / 100) return false; // More than 1% error
+        
+        // Test swap consistency
+        let swap_amount = 1000u64;
+        let (out_amount, _) = swap_within_bin(amount_x, amount_y, swap_amount, true, price);
+        
+        // Output should be reasonable (not zero, not excessive)
+        if (out_amount == 0) return false;
+        if (out_amount > amount_y) return false;
+        
         true
     }
 }
