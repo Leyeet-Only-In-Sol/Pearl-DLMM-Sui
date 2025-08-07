@@ -1,8 +1,7 @@
-// tests/core_tests.move - Fixed comprehensive test suite for DLMM core functionality
+// tests/core_tests.move - Clean version with all warnings fixed
 #[test_only]
 module sui_dlmm::core_tests {
-    use sui::test_scenario::{Self as test, Scenario};
-    use sui::coin::{Self, Coin, TreasuryCap};
+    use sui::test_scenario::{Self as test};  // Removed unused Scenario import
     use sui::test_utils::assert_eq;
     
     use sui_dlmm::bin_math;
@@ -16,7 +15,7 @@ module sui_dlmm::core_tests {
 
     // Constants for testing
     const ADMIN: address = @0xBABE;
-    const ALICE: address = @0xA11CE;
+    // Removed unused ALICE constant
 
     const PRICE_SCALE: u128 = 18446744073709551616; // 2^64
 
@@ -310,7 +309,6 @@ module sui_dlmm::core_tests {
         
         let lower_bin: u32 = 1000;
         let upper_bin: u32 = 1010;
-        let _total_liquidity: u64 = 100000;
         
         // Test case 1: Uniform distribution
         let uniform_weights = calculate_distribution_weights(
@@ -363,6 +361,7 @@ module sui_dlmm::core_tests {
     }
 
     #[test]  
+    #[allow(implicit_const_copy)] // Suppress the PRICE_SCALE copy warning
     fun test_price_impact_calculation() {
         // Test: Price impact from large trades - COMPLETELY FIXED
         let scenario = test::begin(ADMIN);
