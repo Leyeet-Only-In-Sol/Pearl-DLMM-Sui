@@ -20,6 +20,7 @@ module sui_dlmm::factory {
     public struct DLMMFactory has key {
         id: sui::object::UID,
         pools: Table<vector<u8>, sui::object::ID>,    // pool_key -> pool_id mapping
+        pool_registry: Table<sui::object::ID, PoolRegistry>, // NEW: pool_id -> registry mapping
         allowed_bin_steps: vector<u16>,               // Allowed bin step values
         protocol_fee_rate: u16,                       // Global protocol fee rate
         pool_count: u64,                              // Total pools created
@@ -27,9 +28,10 @@ module sui_dlmm::factory {
         created_at: u64,                              // Factory creation timestamp
     }
 
-    /// Pool registry entry
+    /// Pool registry entry - Now properly used for pool discovery and analytics
+    #[allow(unused_field)] // Suppress warnings for future-use fields
     public struct PoolRegistry has copy, drop, store {
-        pool_id: ID,
+        pool_id: sui::object::ID,
         coin_a: TypeName,
         coin_b: TypeName,
         bin_step: u16,
@@ -44,6 +46,7 @@ module sui_dlmm::factory {
         let factory = DLMMFactory {
             id: sui::object::new(ctx),
             pools: table::new(ctx),
+            pool_registry: table::new(ctx), // NEW: Initialize registry table
             allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000], // Common bin steps
             protocol_fee_rate: 300, // 3% default
             pool_count: 0,
@@ -86,9 +89,22 @@ module sui_dlmm::factory {
         );
 
         let pool_id = sui::object::id(&pool);
+        let current_time = sui::clock::timestamp_ms(clock);
         
-        // Register pool in factory
+        // Register pool in factory pools mapping
         table::add(&mut factory.pools, pool_key, pool_id);
+        
+        // NEW: Add to pool registry for discovery and analytics
+        let registry_entry = PoolRegistry {
+            pool_id,
+            coin_a: type_name::get<CoinA>(),
+            coin_b: type_name::get<CoinB>(),
+            bin_step,
+            creator: sender(ctx),
+            created_at: current_time,
+        };
+        table::add(&mut factory.pool_registry, pool_id, registry_entry);
+        
         factory.pool_count = factory.pool_count + 1;
 
         // Emit pool creation event
@@ -106,7 +122,7 @@ module sui_dlmm::factory {
         pool
     }
 
-    /// Generate unique pool key from token types and bin_step (FIXED)
+    /// Generate unique pool key from token types and bin_step
     fun generate_pool_key<CoinA, CoinB>(bin_step: u16): vector<u8> {
         let mut key = vector::empty<u8>();
         
@@ -177,6 +193,72 @@ module sui_dlmm::factory {
     ): bool {
         let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
         table::contains(&factory.pools, pool_key)
+    }
+
+    /// NEW: Get pool registry information by pool ID
+    public fun get_pool_registry_info(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): std::option::Option<PoolRegistry> {
+        if (table::contains(&factory.pool_registry, pool_id)) {
+            std::option::some(*table::borrow(&factory.pool_registry, pool_id))
+        } else {
+            std::option::none()
+        }
+    }
+
+    /// NEW: Get pool IDs for specific token pair (FIXED - no tuples)
+    public fun get_pools_for_tokens<CoinA, CoinB>(
+        factory: &DLMMFactory
+    ): vector<sui::object::ID> {
+        let mut matching_pools = vector::empty<sui::object::ID>();
+        
+        // Check common bin steps for this token pair
+        let common_steps = vector[1, 5, 10, 25, 50, 100, 200, 500, 1000];
+        let mut i = 0;
+        
+        while (i < vector::length(&common_steps)) {
+            let bin_step = *vector::borrow(&common_steps, i);
+            let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
+            
+            if (table::contains(&factory.pools, pool_key)) {
+                let pool_id = *table::borrow(&factory.pools, pool_key);
+                vector::push_back(&mut matching_pools, pool_id);
+            };
+            i = i + 1;
+        };
+        
+        matching_pools
+    }
+
+    /// NEW: Get detailed pool info by pool ID (FIXED - return separate values)
+    public fun get_pool_details(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): (bool, u16, address, u64, TypeName, TypeName) { // (exists, bin_step, creator, created_at, coin_a, coin_b)
+        if (table::contains(&factory.pool_registry, pool_id)) {
+            let registry = table::borrow(&factory.pool_registry, pool_id);
+            (
+                true,
+                registry.bin_step,
+                registry.creator,
+                registry.created_at,
+                registry.coin_a,
+                registry.coin_b
+            )
+        } else {
+            (false, 0, @0x0, 0, type_name::get<u8>(), type_name::get<u8>()) // Dummy types for false case
+        }
+    }
+
+    /// NEW: Get all pools created by specific address (FIXED - remove unused params)
+    public fun get_pools_by_creator(
+        _factory: &DLMMFactory,
+        _creator: address
+    ): vector<sui::object::ID> {
+        // Simplified implementation - return empty for now
+        // TODO: Implement proper registry iteration when needed
+        vector::empty<sui::object::ID>()
     }
 
     /// Get all pools count
@@ -296,7 +378,7 @@ module sui_dlmm::factory {
 
     // ==================== Utility Functions ====================
 
-    /// Create pool and share it immediately (FIXED - delegate to dlmm_pool)
+    /// Create pool and share it immediately
     public entry fun create_and_share_pool<CoinA, CoinB>(
         factory: &mut DLMMFactory,
         bin_step: u16,
@@ -318,7 +400,6 @@ module sui_dlmm::factory {
             ctx
         );
         
-        // FIXED: Use dlmm_pool's share function instead of direct transfer
         dlmm_pool::share_pool(pool);
     }
 
@@ -386,6 +467,7 @@ module sui_dlmm::factory {
         DLMMFactory {
             id: sui::object::new(ctx),
             pools: table::new(ctx),
+            pool_registry: table::new(ctx), // NEW: Include in test factory
             allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000],
             protocol_fee_rate: 300,
             pool_count: 0,
@@ -398,5 +480,11 @@ module sui_dlmm::factory {
     /// Get pool key for testing
     public fun test_generate_pool_key<CoinA, CoinB>(bin_step: u16): vector<u8> {
         generate_pool_key<CoinA, CoinB>(bin_step)
+    }
+
+    #[test_only]
+    /// Test registry functionality
+    public fun test_pool_registry(factory: &DLMMFactory, pool_id: sui::object::ID): bool {
+        table::contains(&factory.pool_registry, pool_id)
     }
 }
