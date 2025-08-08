@@ -3,9 +3,9 @@ module sui_dlmm::factory_tests {
     use sui::test_scenario::{Self as test};
     use sui::test_utils::assert_eq;
     use sui::coin;
-    use sui::clock::{Self, Clock};
+    use sui::clock;
     
-    use sui_dlmm::factory::{Self, DLMMFactory};
+    use sui_dlmm::factory;
     use sui_dlmm::dlmm_pool;
     use sui_dlmm::bin_math;
 
@@ -368,7 +368,7 @@ module sui_dlmm::factory_tests {
         assert!(current_price > 0, 0);
         assert!(is_active, 0);
         
-        // Test pool reserves function
+        // FIXED: Destructure tuple immediately in function call
         let (direct_reserves_a, direct_reserves_b) = factory::get_pool_reserves<USDC, ETH>(&factory, pool_id);
         assert_eq(direct_reserves_a, reserves_a);
         assert_eq(direct_reserves_b, reserves_b);
@@ -414,8 +414,10 @@ module sui_dlmm::factory_tests {
         let fake_pool_data = factory::get_pool_data<USDC, ETH>(&factory, fake_pool_id);
         assert!(std::option::is_none(&fake_pool_data), 0);
         
-        let fake_reserves = factory::get_pool_reserves<USDC, ETH>(&factory, fake_pool_id);
-        assert_eq(fake_reserves, (0, 0));
+        // FIXED: Destructure tuple immediately in function call
+        let (fake_reserves_a, fake_reserves_b) = factory::get_pool_reserves<USDC, ETH>(&factory, fake_pool_id);
+        assert_eq(fake_reserves_a, 0);
+        assert_eq(fake_reserves_b, 0);
         
         let fake_can_handle = factory::can_pool_handle_swap<USDC, ETH>(&factory, fake_pool_id, 1000, true);
         assert!(!fake_can_handle, 0);
@@ -437,3 +439,4 @@ module sui_dlmm::factory_tests {
         clock::destroy_for_testing(clock);
         test::end(scenario);
     }
+}
