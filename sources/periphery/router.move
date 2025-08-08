@@ -1,44 +1,32 @@
-/// FIXED router.move - Complete error resolution
-#[allow(duplicate_alias, unused_use, unused_const, unused_field, unused_variable, unused_let_mut)]
 module sui_dlmm::router {
-    use std::vector;
     use std::type_name::{Self, TypeName};
-    use sui::object::{Self, UID};
-    use sui::tx_context::{Self, TxContext};
     use sui::coin::{Self, Coin};
-    use sui::balance::{Self, Balance};
     use sui::clock::Clock;
     use sui::event;
 
-    use sui_dlmm::factory::{DLMMFactory};
-    use sui_dlmm::dlmm_pool::{Self, DLMMPool};
-    use sui_dlmm::quoter;
-    use sui_dlmm::router_types::{Self, SwapPath, PathNode, QuoteResult};
+    use sui_dlmm::factory::{Self, DLMMFactory};
+    use sui_dlmm::dlmm_pool;
+    use sui_dlmm::router_types::{Self, QuoteResult};
 
     // ==================== Error Codes ====================
     
     const EINVALID_AMOUNT: u64 = 1;
     const EINSUFFICIENT_OUTPUT: u64 = 2;
     const EEXCESSIVE_INPUT: u64 = 3;
-    const EINVALID_PATH: u64 = 4;
     const EEXPIRED_DEADLINE: u64 = 5;
-    const EEXCESSIVE_PRICE_IMPACT: u64 = 6;
     const EINSUFFICIENT_LIQUIDITY: u64 = 7;
     const ENO_ROUTE_FOUND: u64 = 8;
     const EINVALID_RECIPIENT: u64 = 9;
-    const ETOO_MANY_HOPS: u64 = 10;
 
     // ==================== Constants ====================
     
     const MAX_PRICE_IMPACT_BPS: u128 = 1000; // 10%
-    const DEFAULT_SLIPPAGE_BPS: u64 = 50; // 0.5%
-    const MAX_DEADLINE_EXTENSION: u64 = 3600000; // 1 hour in ms
 
     // ==================== Structs ====================
 
     /// Router configuration and state
     public struct Router has key {
-        id: UID,
+        id: sui::object::UID,
         admin: address,
         is_paused: bool,
         total_swaps: u64,
@@ -46,36 +34,16 @@ module sui_dlmm::router {
         created_at: u64,
     }
 
-    /// Swap parameters for exact input swaps
-    public struct SwapExactInputParams has copy, drop {
-        path: SwapPath,
-        amount_in: u64,
-        amount_out_min: u64,
-        recipient: address,
-        deadline: u64,
-    }
-
-    /// Swap parameters for exact output swaps
-    public struct SwapExactOutputParams has copy, drop {
-        path: SwapPath,
-        amount_out: u64,
-        amount_in_max: u64,
-        recipient: address,
-        deadline: u64,
-    }
-
-    /// Multi-path swap parameters for complex routing
-    public struct MultiPathSwapParams has copy, drop {
-        paths: vector<SwapPath>,
-        amount_in: u64,
-        amount_out_min: u64,
-        recipient: address,
-        deadline: u64,
+    /// Route info struct to replace tuple return type
+    public struct RouteInfo has copy, drop {
+        pool_id: sui::object::ID,
+        bin_step: u16,
+        reserves_a: u64,
+        reserves_b: u64,
     }
 
     // ==================== Events ====================
 
-    /// Emitted when a swap is executed
     public struct SwapExecuted has copy, drop {
         sender: address,
         recipient: address,
@@ -88,7 +56,6 @@ module sui_dlmm::router {
         fee_paid: u64,
     }
 
-    /// Emitted when a quote is requested
     public struct QuoteRequested has copy, drop {
         sender: address,
         token_in: TypeName,
@@ -100,14 +67,13 @@ module sui_dlmm::router {
 
     // ==================== Initialization ====================
 
-    /// Initialize the router
     public fun initialize_router(
         admin: address,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Router {
         Router {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             admin,
             is_paused: false,
             total_swaps: 0,
@@ -116,18 +82,18 @@ module sui_dlmm::router {
         }
     }
 
-    // ==================== Main Swap Functions ====================
+    // ==================== Real Swap Functions ====================
 
-    /// Execute exact input swap (swap exact amount in for minimum amount out)
+    /// Execute exact input swap with REAL pool operations
     public fun swap_exact_tokens_for_tokens<TokenIn, TokenOut>(
         router: &mut Router,
-        factory: &DLMMFactory,
+        factory: &mut DLMMFactory,
         token_in: Coin<TokenIn>,
         amount_out_min: u64,
         recipient: address,
         deadline: u64,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Coin<TokenOut> {
         assert!(!router.is_paused, EINSUFFICIENT_LIQUIDITY);
         assert!(sui::clock::timestamp_ms(clock) <= deadline, EEXPIRED_DEADLINE);
@@ -136,61 +102,85 @@ module sui_dlmm::router {
         let amount_in = coin::value(&token_in);
         assert!(amount_in > 0, EINVALID_AMOUNT);
 
-        // Get quote and optimal path
-        let quote = quoter::get_quote<TokenIn, TokenOut>(factory, amount_in, clock);
-        let (amount_out, _, price_impact, fee_amount, is_valid) = router_types::get_quote_result_info(&quote);
-        let path_ref = router_types::get_quote_path(&quote);
+        // Find best pool for this token pair
+        let mut best_pool_id_opt = factory::find_best_pool<TokenIn, TokenOut>(factory);
+        assert!(std::option::is_some(&best_pool_id_opt), ENO_ROUTE_FOUND);
+        let pool_id = std::option::extract(&mut best_pool_id_opt);
 
-        // Validate quote
-        assert!(amount_out >= amount_out_min, EINSUFFICIENT_OUTPUT);
-        assert!(price_impact <= MAX_PRICE_IMPACT_BPS, EEXCESSIVE_PRICE_IMPACT);
-        assert!(is_valid, ENO_ROUTE_FOUND);
+        // Verify pool can handle this swap
+        assert!(factory::can_pool_handle_swap<TokenIn, TokenOut>(
+            factory, pool_id, amount_in, true
+        ), EINSUFFICIENT_LIQUIDITY);
 
-        // Execute swap through path
-        let owned_path = copy_swap_path_from_ref(path_ref);
-        let token_out = execute_swap_exact_input(
+        // Execute swap through actual pool
+        let token_out = execute_real_swap<TokenIn, TokenOut>(
             factory,
+            pool_id,
             token_in,
-            owned_path,
             amount_out_min,
             clock,
             ctx
         );
 
         let actual_amount_out = coin::value(&token_out);
+        assert!(actual_amount_out >= amount_out_min, EINSUFFICIENT_OUTPUT);
 
         // Update router statistics
         router.total_swaps = router.total_swaps + 1;
         router.total_volume = router.total_volume + amount_in;
 
         // Emit swap event
-        let path_length = get_path_length_from_ref(path_ref);
         event::emit(SwapExecuted {
-            sender: tx_context::sender(ctx),
+            sender: sui::tx_context::sender(ctx),
             recipient,
             token_in: type_name::get<TokenIn>(),
             token_out: type_name::get<TokenOut>(),
             amount_in,
             amount_out: actual_amount_out,
-            path_length,
-            price_impact,
-            fee_paid: fee_amount,
+            path_length: 1, // Direct swap
+            price_impact: 0, // Will be enhanced later
+            fee_paid: 0, // Will be enhanced later
         });
 
         token_out
     }
 
-    /// Execute exact output swap (swap maximum amount in for exact amount out)
+    /// Execute swap through actual pool stored in factory
+    fun execute_real_swap<TokenIn, TokenOut>(
+        factory: &mut DLMMFactory,
+        pool_id: sui::object::ID,
+        token_in: Coin<TokenIn>,
+        amount_out_min: u64,
+        clock: &Clock,
+        ctx: &mut sui::tx_context::TxContext
+    ): Coin<TokenOut> {
+        // Get mutable reference to actual pool
+        let pool = factory::borrow_pool_mut<TokenIn, TokenOut>(factory, pool_id);
+        
+        // Execute actual swap using pool's swap function
+        let token_out = dlmm_pool::swap<TokenIn, TokenOut>(
+            pool,
+            token_in,
+            amount_out_min,
+            true, // zero_for_one - assume TokenIn->TokenOut
+            clock,
+            ctx
+        );
+
+        token_out
+    }
+
+    /// Execute exact output swap with REAL pool operations
     public fun swap_tokens_for_exact_tokens<TokenIn, TokenOut>(
         router: &mut Router,
-        factory: &DLMMFactory,
+        factory: &mut DLMMFactory,
         mut token_in: Coin<TokenIn>,
         amount_out: u64,
         amount_in_max: u64,
         recipient: address,
         deadline: u64,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): (Coin<TokenOut>, Coin<TokenIn>) {
         assert!(!router.is_paused, EINSUFFICIENT_LIQUIDITY);
         assert!(sui::clock::timestamp_ms(clock) <= deadline, EEXPIRED_DEADLINE);
@@ -200,32 +190,33 @@ module sui_dlmm::router {
         let available_amount_in = coin::value(&token_in);
         assert!(available_amount_in <= amount_in_max, EEXCESSIVE_INPUT);
 
-        // Get quote for reverse calculation
-        let quote = quoter::get_quote<TokenIn, TokenOut>(factory, available_amount_in, clock);
-        let path_ref = router_types::get_quote_path(&quote);
+        // Find best pool
+        let mut best_pool_id_opt = factory::find_best_pool<TokenIn, TokenOut>(factory);
+        assert!(std::option::is_some(&best_pool_id_opt), ENO_ROUTE_FOUND);
+        let pool_id = std::option::extract(&mut best_pool_id_opt);
 
-        // Calculate exact input needed for desired output
-        let owned_path = copy_swap_path_from_ref(path_ref);
-        let amounts_in = quoter::get_amounts_in(factory, owned_path, amount_out);
-        let required_amount_in = if (vector::length(&amounts_in) > 0) {
-            *vector::borrow(&amounts_in, 0)
+        // Get quote to calculate required input
+        let quote = get_real_quote<TokenIn, TokenOut>(factory, pool_id, available_amount_in);
+        let (estimated_out, _, _, _, _) = router_types::get_quote_result_info(&quote);
+        
+        // Estimate required input (simplified calculation)
+        let required_amount_in = if (estimated_out > 0) {
+            (available_amount_in * amount_out) / estimated_out
         } else {
-            0
+            available_amount_in
         };
 
-        assert!(required_amount_in > 0, ENO_ROUTE_FOUND);
         assert!(required_amount_in <= amount_in_max, EEXCESSIVE_INPUT);
         assert!(required_amount_in <= available_amount_in, EINSUFFICIENT_LIQUIDITY);
 
         // Split input coin to use only required amount
         let coin_to_swap = coin::split(&mut token_in, required_amount_in, ctx);
         
-        // Execute exact input swap
-        let owned_path_for_swap = copy_swap_path_from_ref(path_ref);
-        let token_out = execute_swap_exact_input(
+        // Execute swap
+        let token_out = execute_real_swap<TokenIn, TokenOut>(
             factory,
+            pool_id,
             coin_to_swap,
-            owned_path_for_swap,
             amount_out,
             clock,
             ctx
@@ -238,141 +229,103 @@ module sui_dlmm::router {
         router.total_swaps = router.total_swaps + 1;
         router.total_volume = router.total_volume + required_amount_in;
 
-        // Emit swap event
-        let (_, _, price_impact, fee_amount, _) = router_types::get_quote_result_info(&quote);
-        let path_length = get_path_length_from_ref(path_ref);
-        event::emit(SwapExecuted {
-            sender: tx_context::sender(ctx),
-            recipient,
-            token_in: type_name::get<TokenIn>(),
-            token_out: type_name::get<TokenOut>(),
-            amount_in: required_amount_in,
-            amount_out: actual_amount_out,
-            path_length,
-            price_impact,
-            fee_paid: fee_amount,
-        });
-
-        (token_out, token_in) // Return output token and remaining input token
+        (token_out, token_in)
     }
 
-    // ==================== Advanced Swap Functions ====================
+    // ==================== Multi-Hop Implementation ====================
 
-    /// Execute multi-path swap for better price execution
-    public fun swap_exact_tokens_for_tokens_multi_path<TokenIn, TokenOut>(
+    /// Execute multi-hop swap with REAL pool operations
+    public fun swap_exact_tokens_multi_hop<TokenIn, TokenMid, TokenOut>(
         router: &mut Router,
-        factory: &DLMMFactory,
+        factory: &mut DLMMFactory,
         token_in: Coin<TokenIn>,
-        paths: vector<SwapPath>,
-        amounts_in: vector<u64>,
         amount_out_min: u64,
         recipient: address,
         deadline: u64,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Coin<TokenOut> {
         assert!(!router.is_paused, EINSUFFICIENT_LIQUIDITY);
         assert!(sui::clock::timestamp_ms(clock) <= deadline, EEXPIRED_DEADLINE);
-        assert!(vector::length(&paths) == vector::length(&amounts_in), EINVALID_PATH);
-        assert!(vector::length(&paths) <= 5, ETOO_MANY_HOPS);
 
-        let total_amount_in = coin::value(&token_in);
-        assert!(total_amount_in > 0, EINVALID_AMOUNT);
+        let amount_in = coin::value(&token_in);
+        assert!(amount_in > 0, EINVALID_AMOUNT);
 
-        // Validate that amounts_in sum to total_amount_in
-        let mut sum_amounts = 0u64;
-        let mut i = 0;
-        while (i < vector::length(&amounts_in)) {
-            sum_amounts = sum_amounts + *vector::borrow(&amounts_in, i);
-            i = i + 1;
-        };
-        assert!(sum_amounts == total_amount_in, EINVALID_AMOUNT);
+        // First hop: TokenIn -> TokenMid
+        let mut pool1_id_opt = factory::find_best_pool<TokenIn, TokenMid>(factory);
+        assert!(std::option::is_some(&pool1_id_opt), ENO_ROUTE_FOUND);
+        let pool1_id = std::option::extract(&mut pool1_id_opt);
 
-        // Execute swaps through each path
-        let mut output_coins = vector::empty<Coin<TokenOut>>();
-        
-        // Process all paths except the last one
-        let mut remaining_coin = token_in;
-        i = 0;
-        while (i < vector::length(&paths) - 1) {
-            let path = *vector::borrow(&paths, i);
-            let amount_for_path = *vector::borrow(&amounts_in, i);
-            
-            if (amount_for_path > 0) {
-                let coin_for_path = coin::split(&mut remaining_coin, amount_for_path, ctx);
-                let output_coin = execute_swap_exact_input(
-                    factory,
-                    coin_for_path,
-                    path,
-                    0,
-                    clock,
-                    ctx
-                );
-                vector::push_back(&mut output_coins, output_coin);
-            };
-            i = i + 1;
-        };
-        
-        // Process the last path with remaining coin
-        if (vector::length(&paths) > 0) {
-            let last_path = *vector::borrow(&paths, vector::length(&paths) - 1);
-            let output_coin = execute_swap_exact_input(
-                factory,
-                remaining_coin,
-                last_path,
-                0,
-                clock,
-                ctx
-            );
-            vector::push_back(&mut output_coins, output_coin);
-        } else {
-            // No paths, destroy the input coin
-            coin::destroy_zero(remaining_coin);
-        };
+        let token_mid = execute_real_swap<TokenIn, TokenMid>(
+            factory,
+            pool1_id,
+            token_in,
+            0, // No minimum for intermediate step
+            clock,
+            ctx
+        );
 
-        // Merge all output coins
-        let mut final_output = vector::pop_back(&mut output_coins);
-        while (!vector::is_empty(&output_coins)) {
-            let coin_to_merge = vector::pop_back(&mut output_coins);
-            coin::join(&mut final_output, coin_to_merge);
-        };
-        vector::destroy_empty(output_coins);
+        // Second hop: TokenMid -> TokenOut
+        let mut pool2_id_opt = factory::find_best_pool<TokenMid, TokenOut>(factory);
+        assert!(std::option::is_some(&pool2_id_opt), ENO_ROUTE_FOUND);
+        let pool2_id = std::option::extract(&mut pool2_id_opt);
 
-        let actual_amount_out = coin::value(&final_output);
+        let token_out = execute_real_swap<TokenMid, TokenOut>(
+            factory,
+            pool2_id,
+            token_mid,
+            amount_out_min,
+            clock,
+            ctx
+        );
+
+        let actual_amount_out = coin::value(&token_out);
         assert!(actual_amount_out >= amount_out_min, EINSUFFICIENT_OUTPUT);
 
         // Update router statistics
         router.total_swaps = router.total_swaps + 1;
-        router.total_volume = router.total_volume + total_amount_in;
+        router.total_volume = router.total_volume + amount_in;
 
-        // Emit swap event
+        // Emit multi-hop swap event
         event::emit(SwapExecuted {
-            sender: tx_context::sender(ctx),
+            sender: sui::tx_context::sender(ctx),
             recipient,
             token_in: type_name::get<TokenIn>(),
             token_out: type_name::get<TokenOut>(),
-            amount_in: total_amount_in,
+            amount_in,
             amount_out: actual_amount_out,
-            path_length: vector::length(&paths),
+            path_length: 2, // Two hops
             price_impact: 0,
             fee_paid: 0,
         });
 
-        final_output
+        token_out
     }
 
     // ==================== Quote Functions ====================
 
-    /// Get quote for exact input swap
+    /// Get REAL quote using actual pool data
     public fun get_amounts_out<TokenIn, TokenOut>(
         _router: &Router,
         factory: &DLMMFactory,
         amount_in: u64,
-        clock: &Clock
+        _clock: &Clock
     ): QuoteResult {
         assert!(amount_in > 0, EINVALID_AMOUNT);
         
-        let quote = quoter::get_quote<TokenIn, TokenOut>(factory, amount_in, clock);
+        // Find best pool for quote
+        let best_pool_id_opt = factory::find_best_pool<TokenIn, TokenOut>(factory);
+        
+        if (std::option::is_none(&best_pool_id_opt)) {
+            // Return empty quote if no pool found
+            return create_empty_quote()
+        };
+        
+        let mut best_pool_id_opt_mut = best_pool_id_opt;
+        let pool_id = std::option::extract(&mut best_pool_id_opt_mut);
+        
+        // Get quote from actual pool
+        let quote = get_real_quote<TokenIn, TokenOut>(factory, pool_id, amount_in);
         
         // Emit quote event
         let (amount_out, _, price_impact, _, _) = router_types::get_quote_result_info(&quote);
@@ -388,139 +341,118 @@ module sui_dlmm::router {
         quote
     }
 
-    /// Get quote for exact output swap
-    public fun get_amounts_in<TokenIn, TokenOut>(
-        _router: &Router,
+    /// Get quote from actual pool data
+    fun get_real_quote<TokenIn, TokenOut>(
         factory: &DLMMFactory,
-        amount_out: u64
-    ): vector<u64> {
-        assert!(amount_out > 0, EINVALID_AMOUNT);
+        pool_id: sui::object::ID,
+        amount_in: u64
+    ): QuoteResult {
+        // Get pool data using the PoolData struct
+        let pool_data_opt = factory::get_pool_data<TokenIn, TokenOut>(factory, pool_id);
         
-        let path = quoter::find_best_path<TokenIn, TokenOut>(factory);
-        quoter::get_amounts_in(factory, path, amount_out)
-    }
-
-    /// Get detailed quote breakdown
-    public fun get_quote_breakdown<TokenIn, TokenOut>(
-        _router: &Router,
-        factory: &DLMMFactory,
-        amount_in: u64,
-        clock: &Clock
-    ): (u64, vector<u64>, vector<u64>, u128, u64) {
-        quoter::get_quote_breakdown<TokenIn, TokenOut>(factory, amount_in, clock)
-    }
-
-    // ==================== Internal Swap Execution ====================
-
-    /// FIXED: Execute swap through a specific path - PROPER COIN HANDLING
-    fun execute_swap_exact_input<TokenIn, TokenOut>(
-        factory: &DLMMFactory,
-        token_in: Coin<TokenIn>,
-        path: SwapPath,
-        amount_out_min: u64,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ): Coin<TokenOut> {
-        let nodes = router_types::get_path_nodes(&path);
-        assert!(vector::length(nodes) > 0, EINVALID_PATH);
-        
-        // For single-hop swap (most common case)
-        if (vector::length(nodes) == 1) {
-            let node = vector::borrow(nodes, 0);
-            return execute_single_hop_swap(factory, token_in, node, amount_out_min, clock, ctx)
+        if (std::option::is_none(&pool_data_opt)) {
+            return create_empty_quote()
         };
         
-        // For multi-hop swaps
-        execute_multi_hop_swap(factory, token_in, path, amount_out_min, clock, ctx)
-    }
-
-    /// FIXED: Execute single-hop swap - MINIMAL VIABLE APPROACH
-    fun execute_single_hop_swap<TokenIn, TokenOut>(
-        _factory: &DLMMFactory,
-        token_in: Coin<TokenIn>,
-        _node: &PathNode,
-        _amount_out_min: u64,
-        _clock: &Clock,
-        ctx: &mut TxContext
-    ): Coin<TokenOut> {
-        // FIXED: Simplest possible approach that compiles
-        let input_amount = coin::value(&token_in);
+        let mut pool_data_opt_mut = pool_data_opt;
+        let pool_data = std::option::extract(&mut pool_data_opt_mut);
         
-        // Properly consume the input coin
-        if (input_amount == 0) {
-            coin::destroy_zero(token_in);
-        } else {
-            // Transfer to a burn address to consume the coin
-            sui::transfer::public_transfer(token_in, @0x0);
-        };
-        
-        // In a real implementation, this would:
-        // 1. Extract the actual pool from factory using node info
-        // 2. Call pool.router_swap() to get real output tokens
-        // 3. Return the actual swapped tokens
-        
-        // For now, return zero coin (placeholder)
-        // This maintains type safety while avoiding non-existent functions
-        coin::zero<TokenOut>(ctx)
-    }
-
-    /// FIXED: Execute multi-hop swap - MINIMAL VIABLE APPROACH
-    fun execute_multi_hop_swap<TokenIn, TokenOut>(
-        _factory: &DLMMFactory,
-        token_in: Coin<TokenIn>,
-        _path: SwapPath,
-        _amount_out_min: u64,
-        _clock: &Clock,
-        ctx: &mut TxContext
-    ): Coin<TokenOut> {
-        // FIXED: Same minimal approach for multi-hop
-        let input_amount = coin::value(&token_in);
-        
-        // Properly consume the input coin
-        if (input_amount == 0) {
-            coin::destroy_zero(token_in);
-        } else {
-            sui::transfer::public_transfer(token_in, @0x0);
-        };
-        
-        // In a real implementation, this would:
-        // 1. Iterate through path nodes
-        // 2. Execute swap through each pool in sequence
-        // 3. Pass output of one swap as input to next
-        // 4. Return final output tokens
-        
-        // For now, return zero coin (placeholder)
-        coin::zero<TokenOut>(ctx)
-    }
-
-    // ==================== Helper Functions ====================
-
-    /// Get path length from reference
-    fun get_path_length_from_ref(path: &SwapPath): u64 {
-        let (hop_count, _, _, _, _) = router_types::get_swap_path_info(path);
-        hop_count as u64
-    }
-
-    /// Copy swap path from reference to owned
-    fun copy_swap_path_from_ref(path_ref: &SwapPath): SwapPath {
-        let nodes = router_types::get_path_nodes(path_ref);
-        let (_, _, _, _, path_type) = router_types::get_swap_path_info(path_ref);
-        
-        let mut new_nodes = vector::empty<PathNode>();
-        let mut i = 0;
-        while (i < vector::length(nodes)) {
-            let node = vector::borrow(nodes, i);
-            let (pool_id, token_in, token_out, bin_step, fee, zero_for_one) = router_types::get_path_node_info(node);
-            let (reserve_in, reserve_out) = router_types::get_path_node_reserves(node);
+        // Extract data from PoolData struct
+        let (bin_step, reserves_a, reserves_b, _current_price, is_active) = 
+            factory::extract_pool_data(&pool_data);
             
-            let new_node = router_types::create_path_node(
-                pool_id, token_in, token_out, bin_step, fee, reserve_in, reserve_out, zero_for_one
-            );
-            vector::push_back(&mut new_nodes, new_node);
-            i = i + 1;
+        if (!is_active || reserves_a == 0 || reserves_b == 0) {
+            return create_empty_quote()
         };
+
+        // Calculate actual output using pool's simulation
+        let pool = factory::borrow_pool<TokenIn, TokenOut>(factory, pool_id);
+        let (amount_out, total_fee, price_impact) = dlmm_pool::simulate_swap_for_router(
+            pool, amount_in, true
+        );
+
+        // Create path for this direct swap
+        let path_node = router_types::create_path_node(
+            pool_id,
+            type_name::get<TokenIn>(),
+            type_name::get<TokenOut>(),
+            bin_step,
+            total_fee,
+            reserves_a,
+            reserves_b,
+            true
+        );
         
-        router_types::create_swap_path(new_nodes, path_type, 0)
+        let mut nodes = std::vector::empty();
+        std::vector::push_back(&mut nodes, path_node);
+        let swap_path = router_types::create_swap_path(nodes, 0, 0);
+
+        // Create quote result
+        router_types::create_quote_result(
+            amount_out,
+            amount_in,
+            price_impact,
+            total_fee,
+            150000, // Estimated gas cost
+            swap_path,
+            amount_out > 0 && price_impact <= MAX_PRICE_IMPACT_BPS
+        )
+    }
+
+    /// Create empty quote for when no route is found
+    fun create_empty_quote(): QuoteResult {
+        let empty_path = router_types::create_swap_path(std::vector::empty(), 0, 0);
+        router_types::create_quote_result(0, 0, 0, 0, 0, empty_path, false)
+    }
+
+    // ==================== Liquidity Functions ====================
+
+    /// Add liquidity to pool through router
+    public fun add_liquidity<CoinA, CoinB>(
+        router: &mut Router,
+        factory: &mut DLMMFactory,
+        coin_a: Coin<CoinA>,
+        coin_b: Coin<CoinB>,
+        bin_step: u16,
+        bin_id: u32,
+        clock: &Clock,
+        ctx: &mut sui::tx_context::TxContext
+    ): u64 {
+        assert!(!router.is_paused, EINSUFFICIENT_LIQUIDITY);
+        
+        // Find or create pool
+        let pool_id_opt = factory::get_pool_id<CoinA, CoinB>(factory, bin_step);
+        
+        let pool_id = if (std::option::is_some(&pool_id_opt)) {
+            let mut pool_id_opt_mut = pool_id_opt;
+            std::option::extract(&mut pool_id_opt_mut)
+        } else {
+            // Create new pool if doesn't exist
+            let initial_price = sui_dlmm::bin_math::calculate_bin_price(bin_id, bin_step);
+            factory::create_and_store_pool<CoinA, CoinB>(
+                factory,
+                bin_step,
+                initial_price,
+                bin_id,
+                coin::zero<CoinA>(ctx), // Empty coins for pool creation
+                coin::zero<CoinB>(ctx),
+                clock,
+                ctx
+            )
+        };
+
+        // Add liquidity to specific bin
+        let pool = factory::borrow_pool_mut<CoinA, CoinB>(factory, pool_id);
+        let shares = dlmm_pool::add_liquidity_to_bin<CoinA, CoinB>(
+            pool,
+            bin_id,
+            coin_a,
+            coin_b,
+            clock,
+            ctx
+        );
+
+        shares
     }
 
     // ==================== Admin Functions ====================
@@ -529,9 +461,9 @@ module sui_dlmm::router {
     public fun set_pause_status(
         router: &mut Router,
         paused: bool,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
-        assert!(tx_context::sender(ctx) == router.admin, EINVALID_RECIPIENT);
+        assert!(sui::tx_context::sender(ctx) == router.admin, EINVALID_RECIPIENT);
         router.is_paused = paused;
     }
 
@@ -539,9 +471,9 @@ module sui_dlmm::router {
     public fun update_admin(
         router: &mut Router,
         new_admin: address,
-        ctx: &TxContext
+        ctx: &sui::tx_context::TxContext
     ) {
-        assert!(tx_context::sender(ctx) == router.admin, EINVALID_RECIPIENT);
+        assert!(sui::tx_context::sender(ctx) == router.admin, EINVALID_RECIPIENT);
         router.admin = new_admin;
     }
 
@@ -567,18 +499,55 @@ module sui_dlmm::router {
         router.admin
     }
 
+    /// Get best route for token pair (FIXED: Returns struct instead of tuple)
+    public fun get_best_route<TokenIn, TokenOut>(
+        factory: &DLMMFactory
+    ): std::option::Option<RouteInfo> {
+        let best_pool_id_opt = factory::find_best_pool<TokenIn, TokenOut>(factory);
+        
+        if (std::option::is_none(&best_pool_id_opt)) {
+            return std::option::none()
+        };
+        
+        let mut best_pool_id_opt_mut = best_pool_id_opt;
+        let pool_id = std::option::extract(&mut best_pool_id_opt_mut);
+        
+        let pool_data_opt = factory::get_pool_data<TokenIn, TokenOut>(factory, pool_id);
+        if (std::option::is_none(&pool_data_opt)) {
+            return std::option::none()
+        };
+        
+        let mut pool_data_opt_mut = pool_data_opt;
+        let pool_data = std::option::extract(&mut pool_data_opt_mut);
+        let (bin_step, reserves_a, reserves_b, _, _) = factory::extract_pool_data(&pool_data);
+        
+        let route_info = RouteInfo {
+            pool_id,
+            bin_step,
+            reserves_a,
+            reserves_b,
+        };
+        
+        std::option::some(route_info)
+    }
+
+    /// Extract route info data
+    public fun extract_route_info(route: &RouteInfo): (sui::object::ID, u16, u64, u64) {
+        (route.pool_id, route.bin_step, route.reserves_a, route.reserves_b)
+    }
+
     // ==================== Entry Functions ====================
 
     /// Entry function for exact input swap
     public entry fun swap_exact_tokens_for_tokens_entry<TokenIn, TokenOut>(
         router: &mut Router,
-        factory: &DLMMFactory,
+        factory: &mut DLMMFactory,
         token_in: Coin<TokenIn>,
         amount_out_min: u64,
         recipient: address,
         deadline: u64,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ) {
         let token_out = swap_exact_tokens_for_tokens<TokenIn, TokenOut>(
             router,
@@ -594,17 +563,17 @@ module sui_dlmm::router {
         sui::transfer::public_transfer(token_out, recipient);
     }
 
-    /// FIXED: Entry function for exact output swap - REMOVED mut WARNING
+    /// Entry function for exact output swap
     public entry fun swap_tokens_for_exact_tokens_entry<TokenIn, TokenOut>(
         router: &mut Router,
-        factory: &DLMMFactory,
-        token_in: Coin<TokenIn>, // REMOVED mut since it's passed by value
+        factory: &mut DLMMFactory,
+        token_in: Coin<TokenIn>,
         amount_out: u64,
         amount_in_max: u64,
         recipient: address,
         deadline: u64,
         clock: &Clock,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ) {
         let (token_out, remaining_token_in) = swap_tokens_for_exact_tokens<TokenIn, TokenOut>(
             router,
@@ -621,10 +590,33 @@ module sui_dlmm::router {
         sui::transfer::public_transfer(token_out, recipient);
         
         if (coin::value(&remaining_token_in) > 0) {
-            sui::transfer::public_transfer(remaining_token_in, tx_context::sender(ctx));
+            sui::transfer::public_transfer(remaining_token_in, sui::tx_context::sender(ctx));
         } else {
             coin::destroy_zero(remaining_token_in);
         };
+    }
+
+    /// Entry function for adding liquidity
+    public entry fun add_liquidity_entry<CoinA, CoinB>(
+        router: &mut Router,
+        factory: &mut DLMMFactory,
+        coin_a: Coin<CoinA>,
+        coin_b: Coin<CoinB>,
+        bin_step: u16,
+        bin_id: u32,
+        clock: &Clock,
+        ctx: &mut sui::tx_context::TxContext
+    ) {
+        let _shares = add_liquidity<CoinA, CoinB>(
+            router,
+            factory,
+            coin_a,
+            coin_b,
+            bin_step,
+            bin_id,
+            clock,
+            ctx
+        );
     }
 
     // ==================== Test Helper Functions ====================
@@ -632,10 +624,10 @@ module sui_dlmm::router {
     #[test_only]
     public fun create_test_router(
         admin: address,
-        ctx: &mut TxContext
+        ctx: &mut sui::tx_context::TxContext
     ): Router {
         Router {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             admin,
             is_paused: false,
             total_swaps: 0,
@@ -654,6 +646,6 @@ module sui_dlmm::router {
             total_volume: _,
             created_at: _,
         } = router;
-        object::delete(id);
+        sui::object::delete(id);
     }
 }

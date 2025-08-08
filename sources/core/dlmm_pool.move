@@ -21,7 +21,7 @@ module sui_dlmm::dlmm_pool {
     const EPOOL_INACTIVE: u64 = 9;
 
     /// Main DLMM pool struct - Uses LiquidityBin from bin module
-    public struct DLMMPool<phantom CoinA, phantom CoinB> has key {
+    public struct DLMMPool<phantom CoinA, phantom CoinB> has key, store {
         id: sui::object::UID,
         bin_step: u16,                          // Basis points between bins
         active_bin_id: u32,                     // Current active bin ID where trades happen

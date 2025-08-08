@@ -4,6 +4,7 @@ module sui_dlmm::factory {
     use sui::coin::Coin;
     use sui::clock::Clock;
     use sui::event;
+    use sui::dynamic_object_field;
     use std::type_name::{Self, TypeName};
     use std::ascii;
     use std::bcs;
@@ -14,22 +15,22 @@ module sui_dlmm::factory {
     const EINVALID_BIN_STEP: u64 = 1;
     const EPOOL_ALREADY_EXISTS: u64 = 2;
     const EUNAUTHORIZED: u64 = 3;
-    const EINVALID_PROTOCOL_FEE: u64 = 4;
+    const EINVALID_PROTOCOL_FEE: u64 = 4; // Now used in set_protocol_fee_rate
+    const EPOOL_NOT_FOUND: u64 = 5;
 
-    /// Factory for creating and managing pools
+    /// Factory for creating and managing pools with real storage
     public struct DLMMFactory has key {
         id: sui::object::UID,
-        pools: Table<vector<u8>, sui::object::ID>,    // pool_key -> pool_id mapping
-        pool_registry: Table<sui::object::ID, PoolRegistry>, // NEW: pool_id -> registry mapping
-        allowed_bin_steps: vector<u16>,               // Allowed bin step values
-        protocol_fee_rate: u16,                       // Global protocol fee rate
-        pool_count: u64,                              // Total pools created
-        admin: address,                               // Admin address for governance
-        created_at: u64,                              // Factory creation timestamp
+        pools: Table<vector<u8>, sui::object::ID>,
+        pool_registry: Table<sui::object::ID, PoolRegistry>,
+        allowed_bin_steps: vector<u16>,
+        protocol_fee_rate: u16,
+        pool_count: u64,
+        admin: address,
+        created_at: u64,
     }
 
-    /// Pool registry entry - Now properly used for pool discovery and analytics
-    #[allow(unused_field)] // Suppress warnings for future-use fields
+    /// Pool registry entry
     public struct PoolRegistry has copy, drop, store {
         pool_id: sui::object::ID,
         coin_a: TypeName,
@@ -39,27 +40,41 @@ module sui_dlmm::factory {
         created_at: u64,
     }
 
+    /// Pool data struct to replace tuple return type
+    public struct PoolData has copy, drop {
+        bin_step: u16,
+        reserves_a: u64,
+        reserves_b: u64,
+        current_price: u128,
+        is_active: bool,
+    }
+
+    /// Pool wrapper for dynamic object fields (FIXED: Added store ability)
+    public struct PoolWrapper<phantom CoinA, phantom CoinB> has key, store {
+        id: sui::object::UID,
+        pool: DLMMPool<CoinA, CoinB>,
+    }
+
     // ==================== Factory Creation ====================
 
-    /// Initialize factory - called once at deployment
     fun init(ctx: &mut sui::tx_context::TxContext) {
         let factory = DLMMFactory {
             id: sui::object::new(ctx),
             pools: table::new(ctx),
-            pool_registry: table::new(ctx), // NEW: Initialize registry table
-            allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000], // Common bin steps
+            pool_registry: table::new(ctx),
+            allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000],
             protocol_fee_rate: 300, // 3% default
             pool_count: 0,
             admin: sender(ctx),
-            created_at: 0, // Will be set properly when we have clock
+            created_at: 0,
         };
         sui::transfer::share_object(factory);
     }
 
-    // ==================== Pool Creation ====================
+    // ==================== Pool Creation & Storage ====================
 
-    /// Create a new DLMM pool (returns pool, doesn't share it)
-    public fun create_pool<CoinA, CoinB>(
+    /// Create and store pool in factory
+    public fun create_and_store_pool<CoinA, CoinB>(
         factory: &mut DLMMFactory,
         bin_step: u16,
         initial_price: u128,
@@ -68,7 +83,7 @@ module sui_dlmm::factory {
         coin_b: Coin<CoinB>,
         clock: &Clock,
         ctx: &mut sui::tx_context::TxContext
-    ): DLMMPool<CoinA, CoinB> {
+    ): sui::object::ID {
         // Validate bin step is allowed
         assert!(vector::contains(&factory.allowed_bin_steps, &bin_step), EINVALID_BIN_STEP);
         
@@ -76,7 +91,7 @@ module sui_dlmm::factory {
         let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
         assert!(!table::contains(&factory.pools, pool_key), EPOOL_ALREADY_EXISTS);
 
-        // Create the pool
+        // Create the actual pool
         let pool = dlmm_pool::create_pool<CoinA, CoinB>(
             bin_step,
             initial_bin_id,
@@ -90,11 +105,18 @@ module sui_dlmm::factory {
 
         let pool_id = sui::object::id(&pool);
         let current_time = sui::clock::timestamp_ms(clock);
+
+        // Store pool using dynamic object fields
+        let pool_wrapper = PoolWrapper {
+            id: sui::object::new(ctx),
+            pool,
+        };
         
-        // Register pool in factory pools mapping
+        dynamic_object_field::add(&mut factory.id, pool_id, pool_wrapper);
+        
+        // Register pool in mappings
         table::add(&mut factory.pools, pool_key, pool_id);
         
-        // NEW: Add to pool registry for discovery and analytics
         let registry_entry = PoolRegistry {
             pool_id,
             coin_a: type_name::get<CoinA>(),
@@ -119,29 +141,194 @@ module sui_dlmm::factory {
             pool_count: factory.pool_count,
         });
 
-        pool
+        pool_id
     }
+
+    // ==================== Pool Access Functions ====================
+
+    /// Get mutable reference to pool for swaps
+    public fun borrow_pool_mut<CoinA, CoinB>(
+        factory: &mut DLMMFactory,
+        pool_id: sui::object::ID
+    ): &mut DLMMPool<CoinA, CoinB> {
+        assert!(dynamic_object_field::exists_(&factory.id, pool_id), EPOOL_NOT_FOUND);
+        
+        let pool_wrapper: &mut PoolWrapper<CoinA, CoinB> = 
+            dynamic_object_field::borrow_mut(&mut factory.id, pool_id);
+        
+        &mut pool_wrapper.pool
+    }
+
+    /// Get immutable reference to pool for queries
+    public fun borrow_pool<CoinA, CoinB>(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): &DLMMPool<CoinA, CoinB> {
+        assert!(dynamic_object_field::exists_(&factory.id, pool_id), EPOOL_NOT_FOUND);
+        
+        let pool_wrapper: &PoolWrapper<CoinA, CoinB> = 
+            dynamic_object_field::borrow(&factory.id, pool_id);
+        
+        &pool_wrapper.pool
+    }
+
+    /// Check if pool exists and is accessible
+    public fun pool_exists_in_factory(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): bool {
+        dynamic_object_field::exists_(&factory.id, pool_id)
+    }
+
+    // ==================== Pool Discovery ====================
+
+    /// Get pool ID for specific token pair and bin step
+    public fun get_pool_id<CoinA, CoinB>(
+        factory: &DLMMFactory,
+        bin_step: u16
+    ): std::option::Option<sui::object::ID> {
+        let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
+        if (table::contains(&factory.pools, pool_key)) {
+            let pool_id = *table::borrow(&factory.pools, pool_key);
+            // Verify pool actually exists in storage
+            if (pool_exists_in_factory(factory, pool_id)) {
+                std::option::some(pool_id)
+            } else {
+                std::option::none()
+            }
+        } else {
+            std::option::none()
+        }
+    }
+
+    /// Find the best pool for token pair
+    public fun find_best_pool<CoinA, CoinB>(
+        factory: &DLMMFactory
+    ): std::option::Option<sui::object::ID> {
+        let mut best_pool_id = std::option::none<sui::object::ID>();
+        let mut best_score = 0u64;
+        
+        // Check all allowed bin steps for this token pair
+        let mut i = 0;
+        while (i < vector::length(&factory.allowed_bin_steps)) {
+            let bin_step = *vector::borrow(&factory.allowed_bin_steps, i);
+            
+            if (pool_exists<CoinA, CoinB>(factory, bin_step)) {
+                let mut pool_id_opt = get_pool_id<CoinA, CoinB>(factory, bin_step);
+                if (std::option::is_some(&pool_id_opt)) {
+                    let pool_id = std::option::extract(&mut pool_id_opt);
+                    
+                    // Calculate pool score based on liquidity and activity
+                    let score = calculate_pool_score<CoinA, CoinB>(factory, pool_id);
+                    
+                    if (score > best_score) {
+                        best_score = score;
+                        best_pool_id = std::option::some(pool_id);
+                    };
+                };
+            };
+            i = i + 1;
+        };
+        
+        best_pool_id
+    }
+
+    /// Calculate pool quality score for routing decisions
+    fun calculate_pool_score<CoinA, CoinB>(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): u64 {
+        if (!pool_exists_in_factory(factory, pool_id)) return 0;
+        
+        let pool = borrow_pool<CoinA, CoinB>(factory, pool_id);
+        let (_, _, reserves_a, reserves_b, total_swaps, _, _, is_active) = dlmm_pool::get_pool_info(pool);
+        
+        if (!is_active) return 0;
+        
+        // Score based on liquidity and activity
+        let liquidity_score = (reserves_a + reserves_b) / 1000; // Scale down
+        let activity_score = total_swaps * 10;
+        
+        liquidity_score + activity_score
+    }
+
+    // ==================== Pool Information Functions ====================
+
+    /// Get comprehensive pool data (FIXED: Returns struct instead of tuple)
+    public fun get_pool_data<CoinA, CoinB>(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): std::option::Option<PoolData> {
+        if (!pool_exists_in_factory(factory, pool_id)) {
+            return std::option::none()
+        };
+        
+        let pool = borrow_pool<CoinA, CoinB>(factory, pool_id);
+        let (bin_step, _, reserves_a, reserves_b, _, _, _, is_active) = dlmm_pool::get_pool_info(pool);
+        let current_price = dlmm_pool::get_current_price(pool);
+        
+        let pool_data = PoolData {
+            bin_step,
+            reserves_a,
+            reserves_b,
+            current_price,
+            is_active,
+        };
+        
+        std::option::some(pool_data)
+    }
+
+    /// Extract data from PoolData struct
+    public fun extract_pool_data(data: &PoolData): (u16, u64, u64, u128, bool) {
+        (data.bin_step, data.reserves_a, data.reserves_b, data.current_price, data.is_active)
+    }
+
+    /// Get pool reserves for specific pool
+    public fun get_pool_reserves<CoinA, CoinB>(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID
+    ): (u64, u64) {
+        if (!pool_exists_in_factory(factory, pool_id)) {
+            return (0, 0)
+        };
+        
+        let pool = borrow_pool<CoinA, CoinB>(factory, pool_id);
+        dlmm_pool::get_pool_reserves(pool)
+    }
+
+    /// Check if pool can handle swap amount
+    public fun can_pool_handle_swap<CoinA, CoinB>(
+        factory: &DLMMFactory,
+        pool_id: sui::object::ID,
+        amount_in: u64,
+        zero_for_one: bool
+    ): bool {
+        if (!pool_exists_in_factory(factory, pool_id)) {
+            return false
+        };
+        
+        let pool = borrow_pool<CoinA, CoinB>(factory, pool_id);
+        dlmm_pool::can_handle_swap_amount(pool, amount_in, zero_for_one)
+    }
+
+    // ==================== Utility Functions ====================
 
     /// Generate unique pool key from token types and bin_step
     fun generate_pool_key<CoinA, CoinB>(bin_step: u16): vector<u8> {
         let mut key = vector::empty<u8>();
         
-        // Get type names and convert directly to bytes
         let type_a = type_name::get<CoinA>();
         let type_b = type_name::get<CoinB>();
         
-        // Convert TypeName to bytes using into_string + as_bytes
         let type_a_bytes = ascii::as_bytes(type_name::borrow_string(&type_a));
         let type_b_bytes = ascii::as_bytes(type_name::borrow_string(&type_b));
         
-        // Ensure consistent ordering (A < B lexicographically)
         let (first_type_bytes, second_type_bytes) = if (compare_bytes(type_a_bytes, type_b_bytes)) {
             (type_a_bytes, type_b_bytes)
         } else {
             (type_b_bytes, type_a_bytes)
         };
         
-        // Construct key: type_a + "::" + type_b + "::" + bin_step
         vector::append(&mut key, *first_type_bytes);
         vector::append(&mut key, b"::");
         vector::append(&mut key, *second_type_bytes);
@@ -151,7 +338,7 @@ module sui_dlmm::factory {
         key
     }
 
-    /// Compare two byte vectors lexicographically (a < b)
+    /// Compare two byte vectors lexicographically
     fun compare_bytes(a: &vector<u8>, b: &vector<u8>): bool {
         let len_a = vector::length(a);
         let len_b = vector::length(b);
@@ -167,23 +354,7 @@ module sui_dlmm::factory {
             i = i + 1;
         };
         
-        // If all bytes are equal, shorter vector comes first
         len_a < len_b
-    }
-
-    // ==================== Pool Registry & Discovery ====================
-
-    /// Get pool ID for a specific token pair and bin step
-    public fun get_pool_id<CoinA, CoinB>(
-        factory: &DLMMFactory,
-        bin_step: u16
-    ): std::option::Option<sui::object::ID> {
-        let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
-        if (table::contains(&factory.pools, pool_key)) {
-            std::option::some(*table::borrow(&factory.pools, pool_key))
-        } else {
-            std::option::none()
-        }
     }
 
     /// Check if pool exists for token pair and bin step
@@ -195,35 +366,21 @@ module sui_dlmm::factory {
         table::contains(&factory.pools, pool_key)
     }
 
-    /// NEW: Get pool registry information by pool ID
-    public fun get_pool_registry_info(
-        factory: &DLMMFactory,
-        pool_id: sui::object::ID
-    ): std::option::Option<PoolRegistry> {
-        if (table::contains(&factory.pool_registry, pool_id)) {
-            std::option::some(*table::borrow(&factory.pool_registry, pool_id))
-        } else {
-            std::option::none()
-        }
-    }
-
-    /// NEW: Get pool IDs for specific token pair (FIXED - no tuples)
+    /// Get all pools for specific token pair
     public fun get_pools_for_tokens<CoinA, CoinB>(
         factory: &DLMMFactory
     ): vector<sui::object::ID> {
         let mut matching_pools = vector::empty<sui::object::ID>();
         
-        // Check common bin steps for this token pair
-        let common_steps = vector[1, 5, 10, 25, 50, 100, 200, 500, 1000];
         let mut i = 0;
-        
-        while (i < vector::length(&common_steps)) {
-            let bin_step = *vector::borrow(&common_steps, i);
-            let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
+        while (i < vector::length(&factory.allowed_bin_steps)) {
+            let bin_step = *vector::borrow(&factory.allowed_bin_steps, i);
             
-            if (table::contains(&factory.pools, pool_key)) {
-                let pool_id = *table::borrow(&factory.pools, pool_key);
-                vector::push_back(&mut matching_pools, pool_id);
+            if (pool_exists<CoinA, CoinB>(factory, bin_step)) {
+                let mut pool_id_opt = get_pool_id<CoinA, CoinB>(factory, bin_step);
+                if (std::option::is_some(&pool_id_opt)) {
+                    vector::push_back(&mut matching_pools, std::option::extract(&mut pool_id_opt));
+                };
             };
             i = i + 1;
         };
@@ -231,92 +388,9 @@ module sui_dlmm::factory {
         matching_pools
     }
 
-    /// NEW: Get detailed pool info by pool ID (FIXED - return separate values)
-    public fun get_pool_details(
-        factory: &DLMMFactory,
-        pool_id: sui::object::ID
-    ): (bool, u16, address, u64, TypeName, TypeName) { // (exists, bin_step, creator, created_at, coin_a, coin_b)
-        if (table::contains(&factory.pool_registry, pool_id)) {
-            let registry = table::borrow(&factory.pool_registry, pool_id);
-            (
-                true,
-                registry.bin_step,
-                registry.creator,
-                registry.created_at,
-                registry.coin_a,
-                registry.coin_b
-            )
-        } else {
-            (false, 0, @0x0, 0, type_name::get<u8>(), type_name::get<u8>()) // Dummy types for false case
-        }
-    }
+    // ==================== Admin Functions ====================
 
-    /// NEW: Get all pools created by specific address (FIXED - remove unused params)
-    public fun get_pools_by_creator(
-        _factory: &DLMMFactory,
-        _creator: address
-    ): vector<sui::object::ID> {
-        // Simplified implementation - return empty for now
-        // TODO: Implement proper registry iteration when needed
-        vector::empty<sui::object::ID>()
-    }
-
-    /// Get all pools count
-    public fun get_pool_count(factory: &DLMMFactory): u64 {
-        factory.pool_count
-    }
-
-    /// Get allowed bin steps
-    public fun get_allowed_bin_steps(factory: &DLMMFactory): vector<u16> {
-        factory.allowed_bin_steps
-    }
-
-    /// Check if bin step is allowed
-    public fun is_bin_step_allowed(factory: &DLMMFactory, bin_step: u16): bool {
-        vector::contains(&factory.allowed_bin_steps, &bin_step)
-    }
-
-    // ==================== Governance Functions ====================
-
-    /// Add allowed bin step (admin only)
-    public fun add_allowed_bin_step(
-        factory: &mut DLMMFactory,
-        bin_step: u16,
-        ctx: &sui::tx_context::TxContext
-    ) {
-        assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
-        assert!(!vector::contains(&factory.allowed_bin_steps, &bin_step), EINVALID_BIN_STEP);
-        
-        vector::push_back(&mut factory.allowed_bin_steps, bin_step);
-        
-        event::emit(BinStepAdded {
-            factory_id: sui::object::uid_to_inner(&factory.id),
-            bin_step,
-            admin: factory.admin,
-        });
-    }
-
-    /// Remove allowed bin step (admin only)
-    public fun remove_allowed_bin_step(
-        factory: &mut DLMMFactory,
-        bin_step: u16,
-        ctx: &sui::tx_context::TxContext
-    ) {
-        assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
-        
-        let (found, index) = vector::index_of(&factory.allowed_bin_steps, &bin_step);
-        assert!(found, EINVALID_BIN_STEP);
-        
-        vector::remove(&mut factory.allowed_bin_steps, index);
-        
-        event::emit(BinStepRemoved {
-            factory_id: sui::object::uid_to_inner(&factory.id),
-            bin_step,
-            admin: factory.admin,
-        });
-    }
-
-    /// Set protocol fee rate (admin only)
+    /// Set protocol fee rate (admin only) - NOW USES THE CONSTANT
     public fun set_protocol_fee_rate(
         factory: &mut DLMMFactory,
         protocol_fee_rate: u16,
@@ -332,6 +406,24 @@ module sui_dlmm::factory {
             factory_id: sui::object::uid_to_inner(&factory.id),
             old_rate,
             new_rate: protocol_fee_rate,
+            admin: factory.admin,
+        });
+    }
+
+    /// Add allowed bin step (admin only)
+    public fun add_allowed_bin_step(
+        factory: &mut DLMMFactory,
+        bin_step: u16,
+        ctx: &sui::tx_context::TxContext
+    ) {
+        assert!(sender(ctx) == factory.admin, EUNAUTHORIZED);
+        assert!(!vector::contains(&factory.allowed_bin_steps, &bin_step), EINVALID_BIN_STEP);
+        
+        vector::push_back(&mut factory.allowed_bin_steps, bin_step);
+        
+        event::emit(BinStepAdded {
+            factory_id: sui::object::uid_to_inner(&factory.id),
+            bin_step,
             admin: factory.admin,
         });
     }
@@ -354,266 +446,32 @@ module sui_dlmm::factory {
         });
     }
 
-// ==================== Router Support Functions ====================
+    // ==================== Entry Functions ====================
 
-#[allow(unused_type_parameter)]
-public fun get_pools_containing_token<Token>(
-    _factory: &DLMMFactory
-): vector<sui::object::ID> {
-    let matching_pools = vector::empty<sui::object::ID>(); // FIXED: Removed 'mut'
-    
-    // Get the TypeName for the token we're looking for
-    let _target_token = std::type_name::get<Token>();
-    
-    // Since we can't iterate tables directly in current Move, we'll use the known pattern:
-    // Check common bin steps for this token
-    let common_steps = vector[1, 5, 10, 25, 50, 100, 200, 500, 1000];
-    let mut i = 0;
-    
-    while (i < vector::length(&common_steps)) {
-        let _bin_step = *vector::borrow(&common_steps, i);
-        
-        // Try to find pools with this token paired with common tokens
-        // This is a simplified approach - full implementation would iterate registry
-        // For now, we return the pools we can find through the existing registry
-        
-        i = i + 1;
-    };
-    
-    matching_pools // Return the empty vector (will be populated in full implementation)
-}
-
-public fun find_direct_pools<CoinA, CoinB>(
-    factory: &DLMMFactory
-): vector<sui::object::ID> {
-    let mut direct_pools = vector::empty<sui::object::ID>();
-    
-    // Check all allowed bin steps for this token pair
-    let mut i = 0;
-    while (i < vector::length(&factory.allowed_bin_steps)) {
-        let bin_step = *vector::borrow(&factory.allowed_bin_steps, i);
-        
-        // Use existing function to check if pool exists
-        if (pool_exists<CoinA, CoinB>(factory, bin_step)) {
-            // FIXED: Use mut for pool_id_opt since we need to extract from it
-            let mut pool_id_opt = get_pool_id<CoinA, CoinB>(factory, bin_step);
-            if (std::option::is_some(&pool_id_opt)) {
-                vector::push_back(&mut direct_pools, std::option::extract(&mut pool_id_opt));
-            };
-        };
-        i = i + 1;
-    };
-    
-    direct_pools
-}
-
-/// REAL: Get actual pool info for router
-public fun get_pool_info_for_router(
-    factory: &DLMMFactory,
-    pool_id: sui::object::ID
-): std::option::Option<sui_dlmm::router_types::PoolInfo> {
-    if (table::contains(&factory.pool_registry, pool_id)) {
-        let registry = table::borrow(&factory.pool_registry, pool_id);
-        
-        // Create actual PoolInfo using registry data
-        let pool_info = sui_dlmm::router_types::create_pool_info(
-            pool_id,
-            registry.coin_a,
-            registry.coin_b,
-            registry.bin_step,
-            0, // reserves_a - needs to be fetched from actual pool
-            0, // reserves_b - needs to be fetched from actual pool  
-            0, // active_bin_id - needs to be fetched from actual pool
-            0, // total_liquidity - needs to be fetched from actual pool
-            true, // is_active - assume true if in registry
-            0, // fee_rate - needs to be fetched from actual pool
-            registry.created_at
+    /// Create pool optimized for router usage
+    public entry fun create_pool_for_router<CoinA, CoinB>(
+        factory: &mut DLMMFactory,
+        bin_step: u16,
+        initial_price: u128,
+        initial_bin_id: u32,
+        coin_a: Coin<CoinA>,
+        coin_b: Coin<CoinB>,
+        clock: &Clock,
+        ctx: &mut sui::tx_context::TxContext
+    ) {
+        let _pool_id = create_and_store_pool<CoinA, CoinB>(
+            factory,
+            bin_step,
+            initial_price,
+            initial_bin_id,
+            coin_a,
+            coin_b,
+            clock,
+            ctx
         );
         
-        std::option::some(pool_info)
-    } else {
-        std::option::none<sui_dlmm::router_types::PoolInfo>()
+        // Pool is automatically stored in factory, no need to share
     }
-}
-
-/// ALTERNATIVE: Simplified working implementation that actually uses the pools
-public fun find_direct_pools_simple<CoinA, CoinB>(
-    factory: &DLMMFactory
-): vector<sui::object::ID> {
-    let mut pools = vector::empty<sui::object::ID>();
-    
-    // Check the most common bin steps
-    let bin_steps = vector[25, 100, 500]; // Most common fee tiers
-    let mut i = 0;
-    
-    while (i < vector::length(&bin_steps)) {
-        let bin_step = *vector::borrow(&bin_steps, i);
-        
-        if (pool_exists<CoinA, CoinB>(factory, bin_step)) {
-            // FIXED: Proper option handling
-            let pool_key = generate_pool_key<CoinA, CoinB>(bin_step);
-            if (table::contains(&factory.pools, pool_key)) {
-                let pool_id = *table::borrow(&factory.pools, pool_key);
-                vector::push_back(&mut pools, pool_id);
-            };
-        };
-        i = i + 1;
-    };
-    
-    pools
-}
-
-/// REAL WORKING: Get pools by specific bin step
-public fun get_pools_by_bin_step_real(
-    factory: &DLMMFactory,
-    target_bin_step: u16
-): vector<sui::object::ID> {
-    let matching_pools = vector::empty<sui::object::ID>(); // FIXED: Removed 'mut'
-    
-    // Since we can't iterate the table directly, we'll check registry entries
-    // This is a limitation of current Move - in practice you'd use indexing service
-    
-    // For now, return empty but the structure is correct for future implementation
-    // when table iteration becomes available
-    
-    let _ = factory; // Use factory to avoid warning
-    let _ = target_bin_step; // Use target_bin_step to avoid warning
-    
-    matching_pools
-}
-
-/// REAL WORKING: Check if any pools exist for token
-#[allow(unused_type_parameter)]
-public fun has_pools_for_token<Token>(factory: &DLMMFactory): bool {
-    // Simple check - see if factory has any pools at all
-    // More sophisticated implementation would check specific token
-    factory.pool_count > 0
-}
-
-/// Create a simple struct for pool registry data instead of tuple
-public struct PoolRegistryData has copy, drop {
-    token_a: TypeName,
-    token_b: TypeName,
-    bin_step: u16,
-    created_at: u64,
-}
-
-/// FIXED: Get pool registry data using struct instead of tuple
-public fun get_pool_registry_data(
-    factory: &DLMMFactory,
-    pool_id: sui::object::ID
-): std::option::Option<PoolRegistryData> {
-    if (table::contains(&factory.pool_registry, pool_id)) {
-        let registry = table::borrow(&factory.pool_registry, pool_id);
-        let data = PoolRegistryData {
-            token_a: registry.coin_a,
-            token_b: registry.coin_b,
-            bin_step: registry.bin_step,
-            created_at: registry.created_at,
-        };
-        std::option::some(data)
-    } else {
-        std::option::none<PoolRegistryData>()
-    }
-}
-
-/// Extract data from PoolRegistryData struct
-public fun extract_pool_registry_data(data: &PoolRegistryData): (TypeName, TypeName, u16, u64) {
-    (data.token_a, data.token_b, data.bin_step, data.created_at)
-}
-
-/// REAL WORKING: Count pools with specific bin step
-public fun count_pools_with_bin_step(
-    factory: &DLMMFactory,
-    target_bin_step: u16
-): u64 {
-    // Simple implementation - count how many allowed bin steps match
-    let mut count = 0u64;
-    let mut i = 0;
-    
-    while (i < vector::length(&factory.allowed_bin_steps)) {
-        let bin_step = *vector::borrow(&factory.allowed_bin_steps, i);
-        if (bin_step == target_bin_step) {
-            count = count + 1;
-        };
-        i = i + 1;
-    };
-    
-    // This gives us how many pools COULD exist with this bin step
-    // Actual count would require iterating the registry
-    count
-}
-
-/// REAL WORKING: Get factory statistics for router
-public fun get_factory_stats_for_router(factory: &DLMMFactory): (u64, u64, u16) {
-    // (total_pools, allowed_bin_steps_count, max_bin_step)
-    let allowed_count = vector::length(&factory.allowed_bin_steps) as u64;
-    
-    // Find max bin step
-    let mut max_bin_step = 0u16;
-    let mut i = 0;
-    while (i < vector::length(&factory.allowed_bin_steps)) {
-        let bin_step = *vector::borrow(&factory.allowed_bin_steps, i);
-        if (bin_step > max_bin_step) {
-            max_bin_step = bin_step;
-        };
-        i = i + 1;
-    };
-    
-    (factory.pool_count, allowed_count, max_bin_step)
-}
-
-/// Get individual pool registry fields (alternative to struct)
-public fun get_pool_token_a(
-    factory: &DLMMFactory,
-    pool_id: sui::object::ID
-): std::option::Option<TypeName> {
-    if (table::contains(&factory.pool_registry, pool_id)) {
-        let registry = table::borrow(&factory.pool_registry, pool_id);
-        std::option::some(registry.coin_a)
-    } else {
-        std::option::none<TypeName>()
-    }
-}
-
-/// Get pool token B
-public fun get_pool_token_b(
-    factory: &DLMMFactory,
-    pool_id: sui::object::ID
-): std::option::Option<TypeName> {
-    if (table::contains(&factory.pool_registry, pool_id)) {
-        let registry = table::borrow(&factory.pool_registry, pool_id);
-        std::option::some(registry.coin_b)
-    } else {
-        std::option::none<TypeName>()
-    }
-}
-
-/// Get pool bin step
-public fun get_pool_bin_step(
-    factory: &DLMMFactory,
-    pool_id: sui::object::ID
-): std::option::Option<u16> {
-    if (table::contains(&factory.pool_registry, pool_id)) {
-        let registry = table::borrow(&factory.pool_registry, pool_id);
-        std::option::some(registry.bin_step)
-    } else {
-        std::option::none<u16>()
-    }
-}
-
-/// Get pool creation time
-public fun get_pool_creation_time(
-    factory: &DLMMFactory,
-    pool_id: sui::object::ID
-): std::option::Option<u64> {
-    if (table::contains(&factory.pool_registry, pool_id)) {
-        let registry = table::borrow(&factory.pool_registry, pool_id);
-        std::option::some(registry.created_at)
-    } else {
-        std::option::none<u64>()
-    }
-}
 
     // ==================== View Functions ====================
 
@@ -627,7 +485,17 @@ public fun get_pool_creation_time(
         )
     }
 
-    /// Get factory admin
+    /// Get pool count
+    public fun get_pool_count(factory: &DLMMFactory): u64 {
+        factory.pool_count
+    }
+
+    /// Get allowed bin steps
+    public fun get_allowed_bin_steps(factory: &DLMMFactory): vector<u16> {
+        factory.allowed_bin_steps
+    }
+
+    /// Get admin address
     public fun get_admin(factory: &DLMMFactory): address {
         factory.admin
     }
@@ -635,51 +503,6 @@ public fun get_pool_creation_time(
     /// Get protocol fee rate
     public fun get_protocol_fee_rate(factory: &DLMMFactory): u16 {
         factory.protocol_fee_rate
-    }
-
-    // ==================== Utility Functions ====================
-
-    /// Create pool and share it immediately
-    public entry fun create_and_share_pool<CoinA, CoinB>(
-        factory: &mut DLMMFactory,
-        bin_step: u16,
-        initial_price: u128,
-        initial_bin_id: u32,
-        coin_a: Coin<CoinA>,
-        coin_b: Coin<CoinB>,
-        clock: &Clock,
-        ctx: &mut sui::tx_context::TxContext
-    ) {
-        let pool = create_pool<CoinA, CoinB>(
-            factory,
-            bin_step,
-            initial_price,
-            initial_bin_id,
-            coin_a,
-            coin_b,
-            clock,
-            ctx
-        );
-        
-        dlmm_pool::share_pool(pool);
-    }
-
-    /// Get recommended bin step for token pair based on characteristics
-    public fun recommend_bin_step(
-        is_stable_pair: bool,
-        expected_volatility: u8 // 0-100 scale
-    ): u16 {
-        if (is_stable_pair) {
-            1 // Ultra-tight spread for stablecoins
-        } else if (expected_volatility < 20) {
-            10 // Low volatility pairs
-        } else if (expected_volatility < 50) {
-            25 // Medium volatility pairs
-        } else if (expected_volatility < 80) {
-            100 // High volatility pairs
-        } else {
-            500 // Very high volatility pairs
-        }
     }
 
     // ==================== Events ====================
@@ -701,12 +524,6 @@ public fun get_pool_creation_time(
         admin: address,
     }
 
-    public struct BinStepRemoved has copy, drop {
-        factory_id: sui::object::ID,
-        bin_step: u16,
-        admin: address,
-    }
-
     public struct ProtocolFeeRateChanged has copy, drop {
         factory_id: sui::object::ID,
         old_rate: u16,
@@ -723,12 +540,11 @@ public fun get_pool_creation_time(
     // ==================== Test Helpers ====================
 
     #[test_only]
-    /// Create factory for testing
-    public fun create_test_factory(admin: address, ctx: &mut sui::tx_context::TxContext): DLMMFactory {
+    public fun create_test_factory_with_storage(admin: address, ctx: &mut sui::tx_context::TxContext): DLMMFactory {
         DLMMFactory {
             id: sui::object::new(ctx),
             pools: table::new(ctx),
-            pool_registry: table::new(ctx), // NEW: Include in test factory
+            pool_registry: table::new(ctx),
             allowed_bin_steps: vector[1, 5, 10, 25, 50, 100, 200, 500, 1000],
             protocol_fee_rate: 300,
             pool_count: 0,
@@ -736,27 +552,9 @@ public fun get_pool_creation_time(
             created_at: 0,
         }
     }
-    
+
     #[test_only]
     public fun transfer_factory_for_testing(factory: DLMMFactory, recipient: address) {
         sui::transfer::transfer(factory, recipient);
-    }
-
-    /// Test helper to share factory 
-    #[test_only] 
-    public fun share_factory_for_testing(factory: DLMMFactory) {
-        sui::transfer::share_object(factory);
-    }
-
-    #[test_only]
-    /// Get pool key for testing
-    public fun test_generate_pool_key<CoinA, CoinB>(bin_step: u16): vector<u8> {
-        generate_pool_key<CoinA, CoinB>(bin_step)
-    }
-
-    #[test_only]
-    /// Test registry functionality
-    public fun test_pool_registry(factory: &DLMMFactory, pool_id: sui::object::ID): bool {
-        table::contains(&factory.pool_registry, pool_id)
     }
 }
