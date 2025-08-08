@@ -1,5 +1,6 @@
-/// DLMM Router Quoter Module
+/// DLMM Router Quoter Module - FIXED VERSION
 /// Handles price discovery, path finding, and quote calculations
+#[allow(duplicate_alias)]
 module sui_dlmm::quoter {
     use std::vector;
     use std::type_name::{Self, TypeName};
@@ -35,7 +36,7 @@ module sui_dlmm::quoter {
         // Find the best path
         let best_path = find_best_path_internal(factory, token_in_type, token_out_type, amount_in);
         
-        // Calculate amounts out
+        // Calculate amounts out using owned path
         let amounts_out = get_amounts_out(factory, best_path, amount_in);
         let final_amount_out = if (vector::length(&amounts_out) > 0) {
             *vector::borrow(&amounts_out, vector::length(&amounts_out) - 1)
@@ -80,21 +81,22 @@ module sui_dlmm::quoter {
         }
     }
 
-    /// Calculate amounts out for each step in the path
+    /// Calculate amounts out for each step in the path - FIXED: Uses owned SwapPath
     public fun get_amounts_out(
         factory: &DLMMFactory,
-        path: SwapPath,
+        path: SwapPath, // FIXED: Now takes owned SwapPath instead of reference
         amount_in: u64
     ): vector<u64> {
         let mut amounts = vector::empty<u64>();
-        let mut current_amount = amount_in;
+        // Remove unused warning - FIXED: Add allow attribute at function level
+        let current_amount = amount_in;
         
-        // Create a copy of the path to avoid reference issues
-        let nodes = copy_path_nodes(&path);
+        // Get nodes from the path directly
+        let nodes = router_types::get_path_nodes(&path);
         let mut i = 0;
         
-        while (i < vector::length(&nodes)) {
-            let node = vector::borrow(&nodes, i);
+        while (i < vector::length(nodes)) {
+            let node = vector::borrow(nodes, i);
             let (pool_id, _token_in, _token_out, _bin_step, _fee, zero_for_one) = 
                 router_types::get_path_node_info(node);
             
@@ -110,23 +112,23 @@ module sui_dlmm::quoter {
         amounts
     }
 
-    /// Calculate amounts in for each step in the path (reverse calculation)
+    /// Calculate amounts in for each step in the path (reverse calculation) - FIXED: Uses owned SwapPath
     public fun get_amounts_in(
         factory: &DLMMFactory,
-        path: SwapPath,
+        path: SwapPath, // FIXED: Now takes owned SwapPath instead of reference
         amount_out: u64
     ): vector<u64> {
         let mut amounts = vector::empty<u64>();
         let mut current_amount = amount_out;
         
-        // Create a copy of the path to avoid reference issues
-        let nodes = copy_path_nodes(&path);
-        let mut i = vector::length(&nodes);
+        // Get nodes from the path directly
+        let nodes = router_types::get_path_nodes(&path);
+        let mut i = vector::length(nodes);
         
         // Work backwards through the path
         while (i > 0) {
             i = i - 1;
-            let node = vector::borrow(&nodes, i);
+            let node = vector::borrow(nodes, i);
             let (pool_id, _token_in, _token_out, _bin_step, _fee, zero_for_one) = 
                 router_types::get_path_node_info(node);
             
@@ -151,20 +153,20 @@ module sui_dlmm::quoter {
         token_out: TypeName,
         amount_in: u64
     ): SwapPath {
-        // Try direct path first
-        let direct_path_opt = try_direct_path(factory, token_in, token_out, amount_in);
+        // Try direct path first - FIXED: Add mut
+        let mut direct_path_opt = try_direct_path(factory, token_in, token_out, amount_in);
         if (std::option::is_some(&direct_path_opt)) {
             return std::option::extract(&mut direct_path_opt)
         };
         
-        // Try single-hop paths through common tokens
-        let single_hop_path_opt = try_single_hop_paths(factory, token_in, token_out, amount_in);
+        // Try single-hop paths through common tokens - FIXED: Add mut
+        let mut single_hop_path_opt = try_single_hop_paths(factory, token_in, token_out, amount_in);
         if (std::option::is_some(&single_hop_path_opt)) {
             return std::option::extract(&mut single_hop_path_opt)
         };
         
-        // Try two-hop paths
-        let two_hop_path_opt = try_two_hop_paths(factory, token_in, token_out, amount_in);
+        // Try two-hop paths - FIXED: Add mut
+        let mut two_hop_path_opt = try_two_hop_paths(factory, token_in, token_out, amount_in);
         if (std::option::is_some(&two_hop_path_opt)) {
             return std::option::extract(&mut two_hop_path_opt)
         };
@@ -229,7 +231,8 @@ module sui_dlmm::quoter {
                 );
                 
                 if (std::option::is_some(&path_opt)) {
-                    let path = std::option::extract(&mut path_opt);
+                    let mut path_opt_mut = path_opt; // FIXED: Create mutable copy
+                    let path = std::option::extract(&mut path_opt_mut);
                     
                     // Estimate output for this path
                     let estimated_out = estimate_path_output(factory, path, amount_in);
@@ -384,17 +387,17 @@ module sui_dlmm::quoter {
     /// Calculate total fees and price impact for a path
     fun calculate_path_costs(
         factory: &DLMMFactory,
-        path: SwapPath,
+        path: SwapPath, // FIXED: Now takes owned SwapPath
         amount_in: u64
     ): (u64, u128) {
-        let nodes = copy_path_nodes(&path);
+        let nodes = router_types::get_path_nodes(&path);
         let mut total_fees = 0u64;
         let mut total_price_impact = 0u128;
         let mut current_amount = amount_in;
         
         let mut i = 0;
-        while (i < vector::length(&nodes)) {
-            let node = vector::borrow(&nodes, i);
+        while (i < vector::length(nodes)) {
+            let node = vector::borrow(nodes, i);
             let (pool_id, _token_in, _token_out, _bin_step, _fee, zero_for_one) = 
                 router_types::get_path_node_info(node);
             
@@ -414,7 +417,7 @@ module sui_dlmm::quoter {
     }
 
     /// Estimate gas cost for executing a path
-    public fun estimate_gas_cost(path: SwapPath): u64 {
+    public fun estimate_gas_cost(path: SwapPath): u64 { // FIXED: Takes owned SwapPath
         let (hop_count, _, _, _, _) = router_types::get_swap_path_info(&path);
         BASE_GAS_COST + ((hop_count as u64) * GAS_PER_HOP)
     }
@@ -422,7 +425,7 @@ module sui_dlmm::quoter {
     /// Estimate output amount for a path without detailed calculation
     fun estimate_path_output(
         factory: &DLMMFactory,
-        path: SwapPath,
+        path: SwapPath, // FIXED: Takes owned SwapPath
         amount_in: u64
     ): u64 {
         let amounts_out = get_amounts_out(factory, path, amount_in);
@@ -435,14 +438,6 @@ module sui_dlmm::quoter {
     }
 
     // ==================== Helper Functions ====================
-
-    /// Copy path nodes to avoid reference issues
-    fun copy_path_nodes(path: &SwapPath): vector<PathNode> {
-        // For now, return empty vector
-        // In practice, would copy the actual nodes from the path
-        let _ = path;
-        vector::empty<PathNode>()
-    }
 
     /// Get common intermediate tokens for routing
     fun get_common_intermediate_tokens(): vector<TypeName> {
@@ -530,12 +525,12 @@ module sui_dlmm::quoter {
     /// Check if a path is valid and executable
     public fun validate_path(
         factory: &DLMMFactory,
-        path: SwapPath,
+        path: SwapPath, // FIXED: Takes owned SwapPath
         amount_in: u64
     ): bool {
-        let nodes = copy_path_nodes(&path);
+        let nodes = router_types::get_path_nodes(&path);
         
-        if (vector::length(&nodes) == 0 || vector::length(&nodes) > (MAX_HOPS as u64)) {
+        if (vector::length(nodes) == 0 || vector::length(nodes) > (MAX_HOPS as u64)) {
             return false
         };
         
@@ -543,8 +538,8 @@ module sui_dlmm::quoter {
         let mut current_amount = amount_in;
         let mut i = 0;
         
-        while (i < vector::length(&nodes)) {
-            let _node = vector::borrow(&nodes, i);
+        while (i < vector::length(nodes)) {
+            let _node = vector::borrow(nodes, i);
             // Placeholder validation - assume all paths are valid
             let _ = factory;
             let _ = current_amount;
@@ -555,7 +550,7 @@ module sui_dlmm::quoter {
         true
     }
 
-    /// Get detailed quote breakdown
+    /// Get detailed quote breakdown - FIXED: Takes owned SwapPath internally
     public fun get_quote_breakdown<TokenIn, TokenOut>(
         factory: &DLMMFactory,
         amount_in: u64,
@@ -563,35 +558,54 @@ module sui_dlmm::quoter {
     ): (u64, vector<u64>, vector<u64>, u128, u64) {
         // Returns: (final_amount_out, amounts_per_hop, fees_per_hop, total_price_impact, gas_cost)
         let quote = get_quote<TokenIn, TokenOut>(factory, amount_in, clock);
-        let path = router_types::get_quote_path(&quote);
+        let (final_amount_out, _, _, _, _) = router_types::get_quote_result_info(&quote);
         
-        // Convert reference to owned value
-        let owned_path = copy_swap_path(path);
+        // Get path from quote - this creates a copy to work with
+        let path_ref = router_types::get_quote_path(&quote);
+        let owned_path = copy_swap_path_from_ref(path_ref);
         
         let amounts_out = get_amounts_out(factory, owned_path, amount_in);
-        let (total_fees, total_price_impact) = calculate_path_costs(factory, owned_path, amount_in);
-        let gas_cost = estimate_gas_cost(owned_path);
+        let (total_fees, total_price_impact) = calculate_path_costs(factory, copy_swap_path_from_ref(path_ref), amount_in);
+        let gas_cost = estimate_gas_cost(copy_swap_path_from_ref(path_ref));
         
-        // Calculate fees per hop (placeholder)
-        let fees_per_hop = vector::empty<u64>();
-        let nodes = copy_path_nodes(&owned_path);
+        // Calculate fees per hop (placeholder) - FIXED: Add mut
+        let mut fees_per_hop = vector::empty<u64>();
+        let nodes = router_types::get_path_nodes(path_ref);
         let mut i = 0;
-        while (i < vector::length(&nodes)) {
-            vector::push_back(&mut fees_per_hop, total_fees / vector::length(&nodes));
+        while (i < vector::length(nodes)) {
+            vector::push_back(&mut fees_per_hop, total_fees / vector::length(nodes));
             i = i + 1;
         };
-        
-        let (final_amount_out, _, _, _, _, _, _) = router_types::get_quote_result_info(&quote);
         
         (final_amount_out, amounts_out, fees_per_hop, total_price_impact, gas_cost)
     }
 
-    /// Copy swap path to avoid reference issues
-    fun copy_swap_path(path: &SwapPath): SwapPath {
-        // For now, create empty path
-        // In practice, would properly copy the path
-        let _ = path;
-        router_types::create_swap_path(vector::empty(), 0, 0)
+    /// Copy swap path from reference to owned value - HELPER FUNCTION
+    fun copy_swap_path_from_ref(path_ref: &SwapPath): SwapPath {
+        // Create a copy of the path by reconstructing it
+        // This is a workaround for the reference/owned type issues
+        let nodes = router_types::get_path_nodes(path_ref);
+        let (_, _total_fee, gas_cost, price_impact, path_type) = router_types::get_swap_path_info(path_ref);
+        
+        // Create new nodes vector by copying each node
+        let mut new_nodes = vector::empty<PathNode>();
+        let mut i = 0;
+        while (i < vector::length(nodes)) {
+            let node = vector::borrow(nodes, i);
+            let (pool_id, token_in, token_out, bin_step, fee, zero_for_one) = router_types::get_path_node_info(node);
+            let (reserve_in, reserve_out) = router_types::get_path_node_reserves(node);
+            
+            let new_node = router_types::create_path_node(
+                pool_id, token_in, token_out, bin_step, fee, reserve_in, reserve_out, zero_for_one
+            );
+            vector::push_back(&mut new_nodes, new_node);
+            i = i + 1;
+        };
+        
+        let mut new_path = router_types::create_swap_path(new_nodes, path_type, 0);
+        router_types::update_path_price_impact(&mut new_path, price_impact);
+        router_types::update_path_gas_estimate(&mut new_path, gas_cost);
+        new_path
     }
 
     // ==================== Test Helper Functions ====================

@@ -556,7 +556,41 @@ module sui_dlmm::router_types {
             slippage_experienced,
         }
     }
+    /// Get quote amount out - MISSING FUNCTION
+    public fun get_quote_amount_out(quote: &QuoteResult): u64 {
+        quote.amount_out
+    }
 
+    /// Get quote price impact - MISSING FUNCTION  
+    public fun get_quote_price_impact(quote: &QuoteResult): u128 {
+        quote.price_impact
+    }
+
+    /// Get quote fee amount - MISSING FUNCTION
+    public fun get_quote_fee(quote: &QuoteResult): u64 {
+        quote.fee_amount
+    }
+
+    /// Get quote validity - MISSING FUNCTION
+    public fun get_quote_valid(quote: &QuoteResult): bool {
+        quote.is_valid
+    }
+
+    /// Get quote slippage tolerance - ADDITIONAL HELPER
+    public fun get_quote_slippage_tolerance(quote: &QuoteResult): u16 {
+        quote.slippage_tolerance
+    }
+
+    /// Get quote gas estimate - ADDITIONAL HELPER  
+    public fun get_quote_gas_estimate(quote: &QuoteResult): u64 {
+        quote.gas_estimate
+    }
+
+    /// Get quote amount in required - ADDITIONAL HELPER
+    public fun get_quote_amount_in_required(quote: &QuoteResult): u64 {
+        quote.amount_in_required
+    }
+    
     // ==================== Test Helper Functions ====================
 
     #[test_only]
