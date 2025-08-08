@@ -27,6 +27,13 @@ sui move test test_swap                  # Swap mechanics
 sui move test test_position              # Position management
 ```
 
+## Addresses Contract
+```
+PACKAGE_ID="0x6a01a88c704d76ef8b0d4db811dff4dd13104a35e7a125131fa35949d0bc2ada"
+FACTORY_ID="0x160e34d10029993bccf6853bb5a5140bcac1794b7c2faccc060fb3d5b7167d7f"
+UPGRADE_CAP="0xfe189ba6983053715ad68254c2a316cfef70f06b442ce54c7f47f3b0fbadecef"
+```
+
 ## 🏗️ Architecture
 
 ### Core Components
