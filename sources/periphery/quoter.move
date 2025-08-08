@@ -1,3 +1,4 @@
+#[allow(duplicate_alias)]
 module sui_dlmm::quoter {
     use std::vector;
     use std::type_name::{Self, TypeName};
@@ -10,7 +11,9 @@ module sui_dlmm::quoter {
     // ==================== Error Codes ====================
     
     const EINVALID_AMOUNT: u64 = 1;
+    #[allow(unused_const)]
     const ENO_POOLS_FOUND: u64 = 2;
+    #[allow(unused_const)]
     const EPOOL_INACTIVE: u64 = 3;
 
     // ==================== Constants ====================
@@ -30,8 +33,8 @@ module sui_dlmm::quoter {
     ): QuoteResult {
         assert!(amount_in > 0, EINVALID_AMOUNT);
         
-        let token_in_type = type_name::get<TokenIn>();
-        let token_out_type = type_name::get<TokenOut>();
+        let _token_in_type = type_name::get<TokenIn>();
+        let _token_out_type = type_name::get<TokenOut>();
         
         // 🔥 REAL: Find the best path using actual pool data
         let best_path = find_best_path_real<TokenIn, TokenOut>(factory, amount_in);
@@ -66,8 +69,8 @@ module sui_dlmm::quoter {
         factory: &DLMMFactory,
         amount_in: u64
     ): SwapPath {
-        let token_in_type = type_name::get<TokenIn>();
-        let token_out_type = type_name::get<TokenOut>();
+        let _token_in_type = type_name::get<TokenIn>();
+        let _token_out_type = type_name::get<TokenOut>();
         
         // 🔥 REAL: Try direct path first using actual pools
         let direct_path_opt = find_direct_path_real<TokenIn, TokenOut>(factory, amount_in);
@@ -162,15 +165,16 @@ module sui_dlmm::quoter {
             return 0
         };
         
-        // Get pool data
+        // Get pool data - FIXED: Proper struct extraction
         let pool_data_opt = factory::get_pool_data<TokenIn, TokenOut>(factory, pool_id);
         if (std::option::is_none(&pool_data_opt)) {
             return 0
         };
         
         let mut pool_data_opt_mut = pool_data_opt;
+        let pool_data = std::option::extract(&mut pool_data_opt_mut);
         let (_bin_step, reserves_a, reserves_b, _current_price, is_active) = 
-            std::option::extract(&mut pool_data_opt_mut);
+            factory::extract_pool_data(&pool_data);
             
         if (!is_active) {
             return 0
@@ -202,14 +206,16 @@ module sui_dlmm::quoter {
             return std::option::none()
         };
         
+        // FIXED: Proper struct extraction
         let pool_data_opt = factory::get_pool_data<TokenIn, TokenOut>(factory, pool_id);
         if (std::option::is_none(&pool_data_opt)) {
             return std::option::none()
         };
         
         let mut pool_data_opt_mut = pool_data_opt;
+        let pool_data = std::option::extract(&mut pool_data_opt_mut);
         let (bin_step, reserves_a, reserves_b, _current_price, is_active) = 
-            std::option::extract(&mut pool_data_opt_mut);
+            factory::extract_pool_data(&pool_data);
             
         if (!is_active) {
             return std::option::none()
@@ -265,14 +271,14 @@ module sui_dlmm::quoter {
             let (pool_id, _token_in, _token_out, _bin_step, _fee, zero_for_one) = 
                 router_types::get_path_node_info(node);
             
-            // 🔥 REAL: Simulate swap using actual pool
-            let simulation_result = simulate_real_swap<TokenIn, TokenOut>(
+            // 🔥 REAL: Simulate swap using actual pool - FIXED: Tuple destructuring
+            let (amount_out, fee_amount, price_impact) = simulate_real_swap<TokenIn, TokenOut>(
                 factory, pool_id, current_amount, zero_for_one
             );
             
-            current_amount = simulation_result.0;
-            total_fees = total_fees + simulation_result.1;
-            total_price_impact = total_price_impact + simulation_result.2;
+            current_amount = amount_out;
+            total_fees = total_fees + fee_amount;
+            total_price_impact = total_price_impact + price_impact;
             
             i = i + 1;
         };
@@ -293,12 +299,12 @@ module sui_dlmm::quoter {
         let mut i = 0;
         while (i < vector::length(nodes)) {
             let node = vector::borrow(nodes, i);
-            let (pool_id, _token_in, _token_out, _bin_step, _fee, zero_for_one) = 
+            let (_pool_id, _token_in, _token_out, _bin_step, _fee, _zero_for_one) = 
                 router_types::get_path_node_info(node);
             
-            // 🔥 REAL: Simulate using actual pool
+            // 🔥 REAL: Simulate using actual pool - FIXED: Tuple destructuring
             let (amount_out, _fee_amount, _price_impact) = simulate_real_swap<TokenIn, TokenOut>(
-                factory, pool_id, current_amount, zero_for_one
+                factory, _pool_id, current_amount, _zero_for_one
             );
             
             vector::push_back(&mut amounts, amount_out);
@@ -427,8 +433,9 @@ module sui_dlmm::quoter {
     // ==================== 🔥 REAL Quote Validation ====================
 
     /// Calculate amounts in for exact output (reverse calculation)
+    #[allow(unused_type_parameter)]
     public fun get_amounts_in<TokenIn, TokenOut>(
-        factory: &DLMMFactory,
+        _factory: &DLMMFactory,
         path: SwapPath,
         amount_out: u64
     ): vector<u64> {
@@ -444,7 +451,7 @@ module sui_dlmm::quoter {
         while (i > 0) {
             i = i - 1;
             let node = vector::borrow(nodes, i);
-            let (pool_id, _token_in, _token_out, _bin_step, _fee, zero_for_one) = 
+            let (_pool_id, _token_in, _token_out, _bin_step, _fee, _zero_for_one) = 
                 router_types::get_path_node_info(node);
             
             // Estimate required input (simplified - real implementation would use pool simulation)
@@ -552,13 +559,14 @@ module sui_dlmm::quoter {
         true
     }
 
-    /// Get optimal path with slippage considerations
+    /// Get optimal path with slippage considerations - FIXED: Removed test function call
     public fun get_optimal_path_with_slippage<TokenIn, TokenOut>(
         factory: &DLMMFactory,
         amount_in: u64,
-        max_slippage_bps: u16
+        max_slippage_bps: u16,
+        clock: &Clock
     ): std::option::Option<SwapPath> {
-        let quote = get_quote<TokenIn, TokenOut>(factory, amount_in, &sui::clock::create_for_testing(&mut sui::tx_context::dummy()));
+        let quote = get_quote<TokenIn, TokenOut>(factory, amount_in, clock);
         let (_, _, price_impact, _, is_valid) = router_types::get_quote_result_info(&quote);
         
         // Check if price impact is within acceptable slippage
@@ -575,7 +583,7 @@ module sui_dlmm::quoter {
     /// Copy swap path from reference to owned value
     fun copy_swap_path_from_ref(path_ref: &SwapPath): SwapPath {
         let nodes = router_types::get_path_nodes(path_ref);
-        let (_, total_fee, gas_cost, price_impact, path_type) = router_types::get_swap_path_info(path_ref);
+        let (_, _total_fee, gas_cost, price_impact, path_type) = router_types::get_swap_path_info(path_ref);
         
         let mut new_nodes = vector::empty<PathNode>();
         let mut i = 0;
@@ -707,9 +715,10 @@ module sui_dlmm::quoter {
     #[test_only]
     public fun test_real_quote_calculation<TokenIn, TokenOut>(
         factory: &DLMMFactory,
-        amount_in: u64
+        amount_in: u64,
+        clock: &Clock
     ): (u64, u64, u128) {
-        let quote = get_quote<TokenIn, TokenOut>(factory, amount_in, &sui::clock::create_for_testing(&mut sui::tx_context::dummy()));
+        let quote = get_quote<TokenIn, TokenOut>(factory, amount_in, clock);
         let (amount_out, _, price_impact, total_fee, _) = router_types::get_quote_result_info(&quote);
         (amount_out, total_fee, price_impact)
     }

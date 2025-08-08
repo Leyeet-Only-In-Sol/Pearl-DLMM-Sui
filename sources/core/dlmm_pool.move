@@ -134,11 +134,11 @@ module sui_dlmm::dlmm_pool {
         table::add(&mut pool.bins, pool.active_bin_id, bin);
     }
 
-    /// Share the pool object (entry function for deployment)
-    #[allow(lint(share_owned))]
-    public entry fun share_pool<CoinA, CoinB>(pool: DLMMPool<CoinA, CoinB>) {
-        sui::transfer::share_object(pool);
-    }
+    // Share the pool object (entry function for deployment)
+    // #[allow(lint(share_owned))]
+    // public entry fun share_pool<CoinA, CoinB>(pool: DLMMPool<CoinA, CoinB>) {
+    //     sui::transfer::share_object(pool);
+    // }
 
     // ==================== Core Swap Implementation ====================
 
